@@ -5,24 +5,14 @@ edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 description = "host your own friday the 13th private server on ps4, one binary, no dependencies"
-repository = "https://github.com/CampCrystalLake/ccl-server"
+repository = "https://github.com"
 authors = ["Camp Crystal Lake <hi@campcrystallake.xyz>"]
-
-[package.metadata.wix]
-upgrade-guid = "1401E903-2986-45D1-995E-4697D286D40C"
-path-guid = "27F223E9-C5BE-4572-B2F0-CE6A76F2A446"
-license = false
-eula = false
 
 [dependencies]
 axum = "0.7"
-clap = { version = "4.6.0", features = ["derive", "env"] }
-futures = "0.3.32"
-rand = "0.10.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
-tokio = { version = "1.52.3", features = ["full"] }
-uuid = { version = "1.23.2", features = ["v4"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
 
 [[bin]]
 name = "ccl-server"
