@@ -25,8 +25,10 @@ async fn main() {
 
     let addr_str = format!("{}:{}", host, port);
     let addr: SocketAddr = addr_str.parse().expect("Invalid HOST or PORT configuration");
+
+    // Fix: Removed "://" so the domain format is valid for rcgen
+    let cert = rcgen::generate_simple_self_signed(vec!["illfonic.com".to_string()]).unwrap();
     
-    let cert = rcgen::generate_simple_self_signed(vec!["://illfonic.com".to_string()]).unwrap();
     let config = RustlsConfig::from_der(
         vec![cert.serialize_der().unwrap()],
         cert.serialize_private_key_der(),
