@@ -6,13 +6,14 @@ use axum::{
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::env;
+use axum_server::tls_rustls::RustlsConfig;
 
 #[tokio::main]
 async fn main() {
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
 
-    println!("Starting Friday the 13th Private Server Backend...");
+    println!("Starting Secure Friday the 13th Private Server with TLS...");
 
     let app = Router::new()
         .route("/", get(home_handler))
@@ -25,10 +26,20 @@ async fn main() {
     let addr_str = format!("{}:{}", host, port);
     let addr: SocketAddr = addr_str.parse().expect("Invalid HOST or PORT configuration");
     
-    println!("Server is running and listening on http://{}", addr);
+    let cert = rcgen::generate_simple_self_signed(vec!["://illfonic.com".to_string()]).unwrap();
+    let config = RustlsConfig::from_der(
+        vec![cert.serialize_der().unwrap()],
+        cert.serialize_private_key_der(),
+    )
+    .await
+    .unwrap();
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    println!("Secure Server is running and listening with TLS on https://{}", addr);
+
+    axum_server::bind_rustls(addr, config)
+        .serve(app.into_make_service())
+        .await
+        .unwrap();
 }
 
 async fn home_handler() -> &'static str {
