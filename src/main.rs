@@ -29,7 +29,7 @@ async fn main() {
 }
 
 async fn home_handler() -> &'static str {
-    "Welcome to KLAY Private Server Backend! Discord: https://discord.gg/SYaM9whT"
+    "Welcome to KLAY Private Server Backend! Discord: https://discord.gg"
 }
 
 #[derive(Serialize, Deserialize)]
@@ -37,13 +37,19 @@ struct LoginResponse {
     success: bool,
     token: String,
     player_level: u32,
+    customization_points: u32,
+    unlock_all_dlc: bool,
+    unlock_backers_content: bool,
 }
 
 async fn login_handler() -> Json<LoginResponse> {
     Json(LoginResponse {
         success: true,
         token: "f13_secure_session_token_xyz".to_string(),
-        player_level: 150, // All features unlocked automatically
+        player_level: 150,
+        customization_points: 999999,
+        unlock_all_dlc: true,
+        unlock_backers_content: true,
     })
 }
 
