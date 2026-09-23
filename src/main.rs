@@ -3,7 +3,6 @@ use axum::{
     http::StatusCode,
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::env;
@@ -13,7 +12,7 @@ async fn main() {
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
 
-    println!("Starting Friday the 13th Private Server...");
+    println!("Starting Friday the 13th Private Server Backend...");
 
     let app = Router::new()
         .route("/", get(home_handler))
