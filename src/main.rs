@@ -1,4 +1,3 @@
-```rust
 use axum::{
     extract::State,
     http::HeaderValue,
@@ -27,10 +26,13 @@ struct LoginRequest {
 struct LoginResponse {
     success: bool,
     token: String,
+
     #[serde(rename = "userId")]
     user_id: String,
+
     #[serde(rename = "displayName")]
     display_name: String,
+
     status: String,
 }
 
@@ -43,7 +45,10 @@ async fn main() {
         .unwrap_or_else(|_| "8080".to_string());
 
     let public_url = env::var("PUBLIC_URL")
-        .unwrap_or_else(|_| "https://f13-custom-backend-production.up.railway.app".to_string());
+        .unwrap_or_else(|_| {
+            "https://f13-custom-backend-production.up.railway.app"
+                .to_string()
+        });
 
     let database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "sqlite:///tmp/f13.db".to_string());
@@ -63,7 +68,7 @@ async fn main() {
         .await
     {
         Ok(pool) => {
-            println!("Database connected");
+            println!("Database connected: {database_url}");
 
             if let Err(error) = sqlx::query(
                 r#"
@@ -79,6 +84,8 @@ async fn main() {
             .await
             {
                 eprintln!("Failed to create sessions table: {error}");
+            } else {
+                println!("Sessions table ready");
             }
 
             Some(pool)
@@ -110,9 +117,18 @@ async fn main() {
         .route("/api/v1/login", post(login_handler))
         .route("/api/v1/auth/psn", post(login_handler))
         .route("/api/v1/profiles/me", get(profile_handler))
-        .route("/api/v1/database/status", get(db_check_handler))
-        .route("/api/v1/database_check", get(db_check_handler))
-        .route("/api/v1/server/info", get(server_info_handler))
+        .route(
+            "/api/v1/database/status",
+            get(db_check_handler),
+        )
+        .route(
+            "/api/v1/database_check",
+            get(db_check_handler),
+        )
+        .route(
+            "/api/v1/server/info",
+            get(server_info_handler),
+        )
         .with_state(state)
         .layer(cors);
 
@@ -120,11 +136,11 @@ async fn main() {
         .parse()
         .expect("Invalid HOST or PORT");
 
+    println!("Server is listening on {addr}");
+
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("Failed to bind");
-
-    println!("Server is listening on {addr}");
 
     axum::serve(listener, app)
         .await
@@ -157,9 +173,13 @@ async fn login_handler(
     let token = Uuid::new_v4().to_string();
 
     if let Some(db) = &state.db {
-        let _ = sqlx::query(
+        if let Err(error) = sqlx::query(
             r#"
-            INSERT INTO sessions (user_id, display_name, token)
+            INSERT INTO sessions (
+                user_id,
+                display_name,
+                token
+            )
             VALUES (?, ?, ?)
             "#,
         )
@@ -167,7 +187,10 @@ async fn login_handler(
         .bind(&display_name)
         .bind(&token)
         .execute(db)
-        .await;
+        .await
+        {
+            eprintln!("Failed to save session: {error}");
+        }
     }
 
     Json(json!(LoginResponse {
@@ -206,12 +229,23 @@ async fn db_check_handler(
                 .await
                 .is_ok()
         }
+
         None => false,
     };
 
     Json(json!({
-        "status": if connected { "online" } else { "degraded" },
-        "database": if connected { "connected" } else { "disconnected" },
+        "status": if connected {
+            "online"
+        } else {
+            "degraded"
+        },
+
+        "database": if connected {
+            "connected"
+        } else {
+            "disconnected"
+        },
+
         "healthy": connected
     }))
 }
@@ -228,4 +262,3 @@ async fn server_info_handler(
         "version": "0.2.0"
     }))
 }
-```
