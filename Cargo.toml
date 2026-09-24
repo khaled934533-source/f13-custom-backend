@@ -4,17 +4,17 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
-description = "host your own friday the 13th private server on ps4, one binary, no dependencies"
-repository = "https://github.com"
-authors = ["Camp Crystal Lake <hi@campcrystallake.xyz>"]
+description = "Friday the 13th private server backend"
+repository = "https://github.com/khaled934533-source/f13-custom-backend"
+authors = ["KLAY"]
 
 [dependencies]
 axum = "0.7"
-axum-server = { version = "0.7", features = ["tls-rustls"] }
-rcgen = "0.12"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls"] }
 tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
 
 [[bin]]
 name = "ccl-server"
@@ -26,3 +26,4 @@ lto = true
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+```
