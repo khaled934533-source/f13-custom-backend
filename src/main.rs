@@ -53,13 +53,12 @@ async fn main() {
 
     let state = AppState {
         db,
-        public_url,
+        public_url: public_url.clone(),
     };
 
     let cors = CorsLayer::new()
         .allow_origin(
-            state
-                .public_url
+            public_url
                 .parse::<HeaderValue>()
                 .expect("Invalid PUBLIC_URL"),
         )
