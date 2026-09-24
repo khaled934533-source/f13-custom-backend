@@ -1,4 +1,3 @@
-```rust
 use axum::{
     extract::State,
     http::HeaderValue,
@@ -156,4 +155,3 @@ async fn db_check_handler(
         "healthy": connected
     }))
 }
-```
