@@ -24,13 +24,35 @@ async fn main() {
     let port = env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string());
 
-    let database_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite:///tmp/f13.db".to_string());
-
     let public_url = env::var("PUBLIC_URL")
         .unwrap_or_else(|_| {
             "https://f13-custom-backend-production.up.railway.app".to_string()
         });
+
+    // Use a writable SQLite location inside the Railway container.
+    let database_path = "/tmp/f13.db";
+
+    let database_url = format!("sqlite://{}", database_path);
+
+    // Make sure the temporary directory exists.
+    if let Err(error) = std::fs::create_dir_all("/tmp") {
+        eprintln!("Failed to create /tmp directory: {error}");
+    }
+
+    // Create the SQLite database file if it does not exist.
+    if !std::path::Path::new(database_path).exists() {
+        match std::fs::File::create(database_path) {
+            Ok(_) => {
+                println!("SQLite database file created: {}", database_path);
+            }
+            Err(error) => {
+                eprintln!(
+                    "Failed to create SQLite database file {}: {}",
+                    database_path, error
+                );
+            }
+        }
+    }
 
     let addr: SocketAddr = format!("{}:{}", host, port)
         .parse()
@@ -42,7 +64,9 @@ async fn main() {
         .await
     {
         Ok(pool) => {
+            println!("========================================");
             println!("Database connected: {}", database_url);
+            println!("========================================");
             Some(pool)
         }
         Err(error) => {
