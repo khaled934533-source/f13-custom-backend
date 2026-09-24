@@ -62,37 +62,82 @@ async fn main() {
     println!("Database: {database_url}");
     println!("========================================");
 
-    let db = match SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-    {
-        Ok(pool) => {
-            println!("Database connected: {database_url}");
+    let db = match database_url.strip_prefix("sqlite://") {
+        Some(path) => {
+            let path = path.to_string();
 
-            if let Err(error) = sqlx::query(
-                r#"
-                CREATE TABLE IF NOT EXISTS sessions (
-                    user_id TEXT PRIMARY KEY,
-                    display_name TEXT NOT NULL,
-                    token TEXT NOT NULL,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                )
-                "#,
-            )
-            .execute(&pool)
-            .await
+            if let Some(parent) =
+                std::path::Path::new(&path).parent()
             {
-                eprintln!("Failed to create sessions table: {error}");
-            } else {
-                println!("Sessions table ready");
+                if let Err(error) =
+                    std::fs::create_dir_all(parent)
+                {
+                    eprintln!(
+                        "Failed to create database directory: {error}"
+                    );
+                }
             }
 
-            Some(pool)
+            if !std::path::Path::new(&path).exists() {
+                if let Err(error) =
+                    std::fs::File::create(&path)
+                {
+                    eprintln!(
+                        "Failed to create database file: {error}"
+                    );
+                } else {
+                    println!(
+                        "SQLite database file created: {path}"
+                    );
+                }
+            }
+
+            match SqlitePoolOptions::new()
+                .max_connections(5)
+                .connect(&database_url)
+                .await
+            {
+                Ok(pool) => {
+                    println!(
+                        "Database connected: {database_url}"
+                    );
+
+                    if let Err(error) = sqlx::query(
+                        r#"
+                        CREATE TABLE IF NOT EXISTS sessions (
+                            user_id TEXT PRIMARY KEY,
+                            display_name TEXT NOT NULL,
+                            token TEXT NOT NULL,
+                            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                        )
+                        "#,
+                    )
+                    .execute(&pool)
+                    .await
+                    {
+                        eprintln!(
+                            "Failed to create sessions table: {error}"
+                        );
+                    } else {
+                        println!("Sessions table ready");
+                    }
+
+                    Some(pool)
+                }
+
+                Err(error) => {
+                    eprintln!(
+                        "Database connection failed: {error}"
+                    );
+                    None
+                }
+            }
         }
 
-        Err(error) => {
-            eprintln!("Database connection failed: {error}");
+        None => {
+            eprintln!(
+                "Invalid SQLite DATABASE_URL: {database_url}"
+            );
             None
         }
     };
@@ -116,7 +161,10 @@ async fn main() {
         .route("/health", get(health_handler))
         .route("/api/v1/login", post(login_handler))
         .route("/api/v1/auth/psn", post(login_handler))
-        .route("/api/v1/profiles/me", get(profile_handler))
+        .route(
+            "/api/v1/profiles/me",
+            get(profile_handler),
+        )
         .route(
             "/api/v1/database/status",
             get(db_check_handler),
@@ -189,7 +237,9 @@ async fn login_handler(
         .execute(db)
         .await
         {
-            eprintln!("Failed to save session: {error}");
+            eprintln!(
+                "Failed to save session: {error}"
+            );
         }
     }
 
