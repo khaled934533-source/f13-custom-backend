@@ -4,16 +4,32 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use std::{env, net::SocketAddr};
-use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
 #[derive(Clone)]
 struct AppState {
     db: Option<SqlitePool>,
     public_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LoginResponse {
+    success: bool,
+    token: String,
+    #[serde(rename = "userId")]
+    user_id: String,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    status: String,
 }
 
 #[tokio::main]
@@ -29,34 +45,20 @@ async fn main() {
             "https://f13-custom-backend-production.up.railway.app".to_string()
         });
 
-    // Use a writable SQLite location inside the Railway container.
     let database_path = "/tmp/f13.db";
-
     let database_url = format!("sqlite://{}", database_path);
 
-    // Make sure the temporary directory exists.
     if let Err(error) = std::fs::create_dir_all("/tmp") {
-        eprintln!("Failed to create /tmp directory: {error}");
+        eprintln!("Failed to create /tmp: {error}");
     }
 
-    // Create the SQLite database file if it does not exist.
     if !std::path::Path::new(database_path).exists() {
-        match std::fs::File::create(database_path) {
-            Ok(_) => {
-                println!("SQLite database file created: {}", database_path);
-            }
-            Err(error) => {
-                eprintln!(
-                    "Failed to create SQLite database file {}: {}",
-                    database_path, error
-                );
-            }
+        if let Err(error) = std::fs::File::create(database_path) {
+            eprintln!("Failed to create database: {error}");
+        } else {
+            println!("SQLite database file created: {database_path}");
         }
     }
-
-    let addr: SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .expect("Invalid HOST or PORT configuration");
 
     let db = match SqlitePoolOptions::new()
         .max_connections(5)
@@ -64,9 +66,24 @@ async fn main() {
         .await
     {
         Ok(pool) => {
-            println!("========================================");
-            println!("Database connected: {}", database_url);
-            println!("========================================");
+            println!("Database connected: {database_url}");
+
+            if let Err(error) = sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS sessions (
+                    user_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    token TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                "#,
+            )
+            .execute(&pool)
+            .await
+            {
+                eprintln!("Failed to create sessions table: {error}");
+            }
+
             Some(pool)
         }
         Err(error) => {
@@ -97,21 +114,27 @@ async fn main() {
         .route("/api/v1/profiles/me", get(profile_handler))
         .route("/api/v1/database/status", get(db_check_handler))
         .route("/api/v1/database_check", get(db_check_handler))
-        .layer(cors)
-        .with_state(state);
+        .route("/api/v1/server/info", get(server_info_handler))
+        .with_state(state)
+        .layer(cors);
 
-    let listener = TcpListener::bind(addr)
-        .await
-        .expect("Failed to bind server");
+    let addr: SocketAddr = format!("{host}:{port}")
+        .parse()
+        .expect("Invalid HOST or PORT");
 
     println!("========================================");
     println!("KLAY Friday the 13th Private Server");
     println!("========================================");
-    println!("Host: {}", host);
-    println!("Port: {}", port);
-    println!("Server URL: {}", public_url);
+    println!("Host: {host}");
+    println!("Port: {port}");
+    println!("Server URL: {public_url}");
     println!("========================================");
-    println!("Server is listening on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("Failed to bind");
+
+    println!("Server is listening on {addr}");
 
     axum::serve(listener, app)
         .await
@@ -119,7 +142,7 @@ async fn main() {
 }
 
 async fn home_handler() -> &'static str {
-    "Welcome to KLAY Private Server Backend!"
+    "KLAY Friday the 13th Private Server"
 }
 
 async fn health_handler(
@@ -132,13 +155,41 @@ async fn health_handler(
     }))
 }
 
-async fn login_handler() -> Json<Value> {
-    Json(json!({
-        "success": true,
-        "token": "f13_secure_session_token_xyz_completed",
-        "userId": "1337",
-        "displayName": "KLAY_Player",
-        "status": "success"
+async fn login_handler(
+    State(state): State<AppState>,
+    Json(request): Json<LoginRequest>,
+) -> Json<Value> {
+    let display_name = request
+        .display_name
+        .unwrap_or_else(|| "KLAY_Player".to_string());
+
+    let user_id = "1337".to_string();
+    let token = "f13_secure_session_token_xyz_completed".to_string();
+
+    if let Some(db) = &state.db {
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO sessions (user_id, display_name, token)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id)
+            DO UPDATE SET
+                display_name = excluded.display_name,
+                token = excluded.token
+            "#,
+        )
+        .bind(&user_id)
+        .bind(&display_name)
+        .bind(&token)
+        .execute(db)
+        .await;
+    }
+
+    Json(json!(LoginResponse {
+        success: true,
+        token,
+        user_id,
+        display_name,
+        status: "success".to_string(),
     }))
 }
 
@@ -176,5 +227,18 @@ async fn db_check_handler(
         "status": if connected { "online" } else { "degraded" },
         "database": if connected { "connected" } else { "disconnected" },
         "healthy": connected
+    }))
+}
+
+async fn server_info_handler(
+    State(state): State<AppState>,
+) -> Json<Value> {
+    Json(json!({
+        "name": "KLAY Friday the 13th Private Server",
+        "status": "online",
+        "backend": "rust-axum",
+        "database": "sqlite",
+        "public_url": state.public_url,
+        "version": "0.1.0"
     }))
 }
