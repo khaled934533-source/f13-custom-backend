@@ -1,3 +1,4 @@
+```rust
 use axum::{
     extract::State,
     http::HeaderValue,
@@ -9,6 +10,7 @@ use serde_json::{json, Value};
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use std::{env, net::SocketAddr};
 use tower_http::cors::CorsLayer;
+use uuid::Uuid;
 
 #[derive(Clone)]
 struct AppState {
@@ -41,24 +43,19 @@ async fn main() {
         .unwrap_or_else(|_| "8080".to_string());
 
     let public_url = env::var("PUBLIC_URL")
-        .unwrap_or_else(|_| {
-            "https://f13-custom-backend-production.up.railway.app".to_string()
-        });
+        .unwrap_or_else(|_| "https://f13-custom-backend-production.up.railway.app".to_string());
 
-    let database_path = "/tmp/f13.db";
-    let database_url = format!("sqlite://{}", database_path);
+    let database_url = env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite:///tmp/f13.db".to_string());
 
-    if let Err(error) = std::fs::create_dir_all("/tmp") {
-        eprintln!("Failed to create /tmp: {error}");
-    }
-
-    if !std::path::Path::new(database_path).exists() {
-        if let Err(error) = std::fs::File::create(database_path) {
-            eprintln!("Failed to create database: {error}");
-        } else {
-            println!("SQLite database file created: {database_path}");
-        }
-    }
+    println!("========================================");
+    println!("KLAY Friday the 13th Private Server");
+    println!("========================================");
+    println!("Host: {host}");
+    println!("Port: {port}");
+    println!("Server URL: {public_url}");
+    println!("Database: {database_url}");
+    println!("========================================");
 
     let db = match SqlitePoolOptions::new()
         .max_connections(5)
@@ -66,7 +63,7 @@ async fn main() {
         .await
     {
         Ok(pool) => {
-            println!("Database connected: {database_url}");
+            println!("Database connected");
 
             if let Err(error) = sqlx::query(
                 r#"
@@ -86,6 +83,7 @@ async fn main() {
 
             Some(pool)
         }
+
         Err(error) => {
             eprintln!("Database connection failed: {error}");
             None
@@ -122,14 +120,6 @@ async fn main() {
         .parse()
         .expect("Invalid HOST or PORT");
 
-    println!("========================================");
-    println!("KLAY Friday the 13th Private Server");
-    println!("========================================");
-    println!("Host: {host}");
-    println!("Port: {port}");
-    println!("Server URL: {public_url}");
-    println!("========================================");
-
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("Failed to bind");
@@ -163,18 +153,14 @@ async fn login_handler(
         .display_name
         .unwrap_or_else(|| "KLAY_Player".to_string());
 
-    let user_id = "1337".to_string();
-    let token = "f13_secure_session_token_xyz_completed".to_string();
+    let user_id = Uuid::new_v4().to_string();
+    let token = Uuid::new_v4().to_string();
 
     if let Some(db) = &state.db {
         let _ = sqlx::query(
             r#"
             INSERT INTO sessions (user_id, display_name, token)
             VALUES (?, ?, ?)
-            ON CONFLICT(user_id)
-            DO UPDATE SET
-                display_name = excluded.display_name,
-                token = excluded.token
             "#,
         )
         .bind(&user_id)
@@ -239,6 +225,7 @@ async fn server_info_handler(
         "backend": "rust-axum",
         "database": "sqlite",
         "public_url": state.public_url,
-        "version": "0.1.0"
+        "version": "0.2.0"
     }))
 }
+```
