@@ -3,9 +3,8 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
-use std::env;
-use std::net::SocketAddr;
-use axum_server::tls_rustls::RustlsConfig;
+use std::{env, net::SocketAddr};
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() {
@@ -15,48 +14,42 @@ async fn main() {
     let port = env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string());
 
-    println!("Starting Secure Friday the 13th Private Server with TLS...");
+    let addr: SocketAddr = format!("{host}:{port}")
+        .parse()
+        .expect("Invalid HOST or PORT configuration");
 
     let app = Router::new()
         .route("/", get(home_handler))
+        .route("/health", get(health_handler))
         .route("/api/v1/login", post(login_handler))
         .route("/api/v1/auth/psn", post(login_handler))
         .route("/api/v1/profiles/me", get(profile_handler))
         .route("/api/v1/database/status", get(db_check_handler))
         .route("/api/v1/database_check", get(db_check_handler));
 
-    let addr_str = format!("{}:{}", host, port);
+    println!("KLAY Friday the 13th Private Server Backend");
+    println!("Discord: https://discord.gg/SYaM9whT");
+    println!("Listening on http://{addr}");
 
-    let addr: SocketAddr = addr_str
-        .parse()
-        .expect("Invalid HOST or PORT configuration");
-
-    // TLS certificate
-    let cert = rcgen::generate_simple_self_signed(
-        vec!["illfonic.com".to_string()]
-    )
-    .unwrap();
-
-    let config = RustlsConfig::from_der(
-        vec![cert.serialize_der().unwrap()],
-        cert.serialize_private_key_der(),
-    )
-    .await
-    .unwrap();
-
-    println!(
-        "Secure Server is running and listening with TLS on https://{}",
-        addr
-    );
-
-    axum_server::bind_rustls(addr, config)
-        .serve(app.into_make_service())
+    let listener = TcpListener::bind(addr)
         .await
-        .unwrap();
+        .expect("Failed to bind server");
+
+    axum::serve(listener, app)
+        .await
+        .expect("Server failed");
 }
 
 async fn home_handler() -> &'static str {
     "Welcome to KLAY Private Server Backend! Discord: https://discord.gg/SYaM9whT"
+}
+
+async fn health_handler() -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "service": "f13-custom-backend",
+        "discord": "https://discord.gg/SYaM9whT"
+    }))
 }
 
 async fn login_handler() -> Json<Value> {
