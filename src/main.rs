@@ -14,7 +14,7 @@ async fn main() {
     let port = env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string());
 
-    let addr: SocketAddr = format!("{host}:{port}")
+    let addr: SocketAddr = format!("{}:{}", host, port)
         .parse()
         .expect("Invalid HOST or PORT configuration");
 
@@ -27,13 +27,21 @@ async fn main() {
         .route("/api/v1/database/status", get(db_check_handler))
         .route("/api/v1/database_check", get(db_check_handler));
 
-    println!("KLAY Friday the 13th Private Server Backend");
+    println!("========================================");
+    println!("KLAY Friday the 13th Private Server");
+    println!("========================================");
     println!("Discord: https://discord.gg/SYaM9whT");
-    println!("Listening on http://{addr}");
+    println!("Host: {}", host);
+    println!("Port: {}", port);
+    println!("Server URL:");
+    println!("https://f13-custom-backend-production.up.railway.app");
+    println!("========================================");
 
     let listener = TcpListener::bind(addr)
         .await
         .expect("Failed to bind server");
+
+    println!("Server is listening on {}", addr);
 
     axum::serve(listener, app)
         .await
