@@ -25,7 +25,7 @@ async fn main() {
         .unwrap_or_else(|_| "8080".to_string());
 
     let database_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://f13.db".to_string());
+        .unwrap_or_else(|_| "sqlite:///tmp/f13.db".to_string());
 
     let public_url = env::var("PUBLIC_URL")
         .unwrap_or_else(|_| {
