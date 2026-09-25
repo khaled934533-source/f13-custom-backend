@@ -163,6 +163,30 @@ async fn main() {
         public_url: public_url.clone(),
     };
 
+    // =========================================================
+    // CUSTOM TCP PROTOCOL
+    // =========================================================
+
+    let tcp_host = env::var("TCP_HOST")
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+
+    let tcp_port = env::var("TCP_PORT")
+        .unwrap_or_else(|_| "9000".to_string());
+
+    let tcp_addr = format!("{tcp_host}:{tcp_port}");
+
+    tokio::spawn(async move {
+        if let Err(error) =
+            protocol::tcp::run_tcp_server(tcp_addr).await
+        {
+            eprintln!("Protocol TCP server stopped: {error}");
+        }
+    });
+
+    // =========================================================
+    // CORS
+    // =========================================================
+
     let cors = CorsLayer::new()
         .allow_origin(
             public_url
@@ -171,6 +195,10 @@ async fn main() {
         )
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any);
+
+    // =========================================================
+    // ROUTES
+    // =========================================================
 
     let app = Router::new()
         .route("/", get(home_handler))
@@ -182,24 +210,48 @@ async fn main() {
         // Authentication
         .route("/api/v1/login", post(login_handler))
         .route("/api/v1/auth/psn", post(login_handler))
-        .route("/api/v1/session/heartbeat", post(heartbeat_handler))
-        .route("/api/v1/session/validate", post(validate_session_handler))
+        .route(
+            "/api/v1/session/heartbeat",
+            post(heartbeat_handler),
+        )
+        .route(
+            "/api/v1/session/validate",
+            post(validate_session_handler),
+        )
 
         // Profile
         .route("/api/v1/profiles/me", get(profile_handler))
 
         // Database
-        .route("/api/v1/database/status", get(db_check_handler))
-        .route("/api/v1/database_check", get(db_check_handler))
+        .route(
+            "/api/v1/database/status",
+            get(db_check_handler),
+        )
+        .route(
+            "/api/v1/database_check",
+            get(db_check_handler),
+        )
 
         // Server
-        .route("/api/v1/server/info", get(server_info_handler))
+        .route(
+            "/api/v1/server/info",
+            get(server_info_handler),
+        )
 
         // Lobbies
         .route("/api/v1/lobbies", get(list_lobbies_handler))
-        .route("/api/v1/lobbies/create", post(create_lobby_handler))
-        .route("/api/v1/lobbies/:lobby_id/join", post(join_lobby_handler))
-        .route("/api/v1/lobbies/:lobby_id/leave", post(leave_lobby_handler))
+        .route(
+            "/api/v1/lobbies/create",
+            post(create_lobby_handler),
+        )
+        .route(
+            "/api/v1/lobbies/:lobby_id/join",
+            post(join_lobby_handler),
+        )
+        .route(
+            "/api/v1/lobbies/:lobby_id/leave",
+            post(leave_lobby_handler),
+        )
 
         .with_state(state)
         .layer(cors);
@@ -219,9 +271,17 @@ async fn main() {
         .expect("Server failed");
 }
 
+// =========================================================
+// HOME
+// =========================================================
+
 async fn home_handler() -> &'static str {
     "KLAY Friday the 13th Private Server v0.3.0"
 }
+
+// =========================================================
+// HEALTH
+// =========================================================
 
 async fn health_handler(
     State(state): State<AppState>,
@@ -244,9 +304,9 @@ async fn health_handler(
     }))
 }
 
-/* =========================================================
-   PROTOCOL
-   ========================================================= */
+// =========================================================
+// PROTOCOL - HTTP TEST API
+// =========================================================
 
 async fn protocol_handler(
     Json(packet): Json<Packet<ClientMessage>>,
@@ -295,14 +355,15 @@ async fn protocol_handler(
 
     Json(Packet {
         version: packet.version,
+        message_id: 0,
         request_id: packet.request_id,
         payload: response,
     })
 }
 
-/* =========================================================
-   LOGIN
-   ========================================================= */
+// =========================================================
+// LOGIN
+// =========================================================
 
 async fn login_handler(
     State(state): State<AppState>,
@@ -354,9 +415,9 @@ async fn login_handler(
     }))
 }
 
-/* =========================================================
-   HEARTBEAT
-   ========================================================= */
+// =========================================================
+// HEARTBEAT
+// =========================================================
 
 async fn heartbeat_handler(
     State(state): State<AppState>,
@@ -388,9 +449,9 @@ async fn heartbeat_handler(
     }
 }
 
-/* =========================================================
-   SESSION VALIDATION
-   ========================================================= */
+// =========================================================
+// SESSION VALIDATION
+// =========================================================
 
 async fn validate_session_handler(
     State(state): State<AppState>,
@@ -424,9 +485,9 @@ async fn validate_session_handler(
     }
 }
 
-/* =========================================================
-   PROFILE
-   ========================================================= */
+// =========================================================
+// PROFILE
+// =========================================================
 
 async fn profile_handler(
     State(state): State<AppState>,
@@ -474,9 +535,9 @@ async fn profile_handler(
     }))
 }
 
-/* =========================================================
-   CREATE LOBBY
-   ========================================================= */
+// =========================================================
+// CREATE LOBBY
+// =========================================================
 
 async fn create_lobby_handler(
     State(state): State<AppState>,
@@ -562,27 +623,28 @@ async fn create_lobby_handler(
     }))
 }
 
-/* =========================================================
-   LIST LOBBIES
-   ========================================================= */
+// =========================================================
+// LIST LOBBIES
+// =========================================================
 
 async fn list_lobbies_handler(
     State(state): State<AppState>,
 ) -> Json<Value> {
-    let lobbies = sqlx::query_as::<_, (String, String, String, i32)>(
-        r#"
-        SELECT
-            lobby_id,
-            name,
-            host_user_id,
-            max_players
-        FROM lobbies
-        ORDER BY created_at DESC
-        "#,
-    )
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let lobbies =
+        sqlx::query_as::<_, (String, String, String, i32)>(
+            r#"
+            SELECT
+                lobby_id,
+                name,
+                host_user_id,
+                max_players
+            FROM lobbies
+            ORDER BY created_at DESC
+            "#,
+        )
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
 
     let mut result = Vec::new();
 
@@ -614,9 +676,9 @@ async fn list_lobbies_handler(
     }))
 }
 
-/* =========================================================
-   JOIN LOBBY
-   ========================================================= */
+// =========================================================
+// JOIN LOBBY
+// =========================================================
 
 async fn join_lobby_handler(
     State(state): State<AppState>,
@@ -638,18 +700,19 @@ async fn join_lobby_handler(
         }));
     };
 
-    let lobby = sqlx::query_as::<_, (String, i32)>(
-        r#"
-        SELECT name, max_players
-        FROM lobbies
-        WHERE lobby_id = ?
-        "#,
-    )
-    .bind(&lobby_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let lobby =
+        sqlx::query_as::<_, (String, i32)>(
+            r#"
+            SELECT name, max_players
+            FROM lobbies
+            WHERE lobby_id = ?
+            "#,
+        )
+        .bind(&lobby_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
 
     let Some((name, max_players)) = lobby else {
         return Json(json!({
@@ -703,9 +766,9 @@ async fn join_lobby_handler(
     }))
 }
 
-/* =========================================================
-   LEAVE LOBBY
-   ========================================================= */
+// =========================================================
+// LEAVE LOBBY
+// =========================================================
 
 async fn leave_lobby_handler(
     State(state): State<AppState>,
@@ -755,9 +818,9 @@ async fn leave_lobby_handler(
     }
 }
 
-/* =========================================================
-   DATABASE CHECK
-   ========================================================= */
+// =========================================================
+// DATABASE CHECK
+// =========================================================
 
 async fn db_check_handler(
     State(state): State<AppState>,
@@ -782,9 +845,9 @@ async fn db_check_handler(
     }))
 }
 
-/* =========================================================
-   SERVER INFO
-   ========================================================= */
+// =========================================================
+// SERVER INFO
+// =========================================================
 
 async fn server_info_handler(
     State(state): State<AppState>,
@@ -803,7 +866,8 @@ async fn server_info_handler(
             "lobbies",
             "lobby_join",
             "lobby_leave",
-            "protocol"
+            "protocol",
+            "custom_tcp_protocol"
         ]
     }))
 }
