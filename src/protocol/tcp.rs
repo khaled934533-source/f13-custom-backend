@@ -60,10 +60,7 @@ pub async fn run_tcp_server(
 async fn handle_client(
     mut stream: TcpStream,
     db: SqlitePool,
-) -> Result<
-    (),
-    Box<dyn std::error::Error + Send + Sync>,
-> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut state = ConnectionState {
         user_id: None,
         display_name: None,
@@ -77,8 +74,7 @@ async fn handle_client(
             Ok(_) => {}
 
             Err(error)
-                if error.kind()
-                    == io::ErrorKind::UnexpectedEof =>
+                if error.kind() == io::ErrorKind::UnexpectedEof =>
             {
                 return Ok(());
             }
@@ -110,26 +106,22 @@ async fn handle_client(
 
         frame.extend_from_slice(&header);
 
-        let mut payload =
-            vec![0u8; payload_len];
+        let mut payload = vec![0u8; payload_len];
 
         stream.read_exact(&mut payload).await?;
 
         frame.extend_from_slice(&payload);
 
-        let (message_id, request_id, message):
-            (u16, u32, ClientMessage) =
-            decode_frame(&frame)?;
+        let (message_id, request_id, message): (
+            u16,
+            u32,
+            ClientMessage,
+        ) = decode_frame(&frame)?;
 
-        let response = handle_message(
-            message,
-            &db,
-            &mut state,
-        )
-        .await;
+        let response =
+            handle_message(message, &db, &mut state).await;
 
-        let response_message_id =
-            message_id | 0x8000;
+        let response_message_id = message_id | 0x8000;
 
         let response_frame =
             encode_frame(
@@ -138,10 +130,7 @@ async fn handle_client(
                 &response,
             )?;
 
-        stream
-            .write_all(&response_frame)
-            .await?;
-
+        stream.write_all(&response_frame).await?;
         stream.flush().await?;
     }
 }
@@ -152,10 +141,6 @@ async fn handle_message(
     state: &mut ConnectionState,
 ) -> ServerMessage {
     match message {
-        // =====================================================
-        // AUTHENTICATE
-        // =====================================================
-
         ClientMessage::Authenticate {
             player_id,
             player_name,
@@ -207,21 +192,14 @@ async fn handle_message(
                     ServerMessage::Error {
                         code: 1001,
                         message:
-                            "authentication_failed"
-                                .to_string(),
+                            "authentication_failed".to_string(),
                     }
                 }
             }
         }
 
-        // =====================================================
-        // HEARTBEAT
-        // =====================================================
-
         ClientMessage::Heartbeat => {
-            if let Some(user_id) =
-                state.user_id.as_ref()
-            {
+            if let Some(user_id) = state.user_id.as_ref() {
                 let _ = sqlx::query(
                     r#"
                     UPDATE sessions
@@ -237,24 +215,16 @@ async fn handle_message(
             ServerMessage::Pong
         }
 
-        // =====================================================
-        // CREATE SESSION
-        // =====================================================
-
         ClientMessage::CreateSession => {
-            let Some(user_id) =
-                state.user_id.as_ref()
-            else {
+            let Some(user_id) = state.user_id.as_ref() else {
                 return ServerMessage::Error {
                     code: 1002,
                     message:
-                        "authentication_required"
-                            .to_string(),
+                        "authentication_required".to_string(),
                 };
             };
 
-            let session_id =
-                Uuid::new_v4().to_string();
+            let session_id = Uuid::new_v4().to_string();
 
             let lobby_name =
                 format!("KLAY Lobby {}", &session_id[..8]);
@@ -287,8 +257,7 @@ async fn handle_message(
                 return ServerMessage::Error {
                     code: 1003,
                     message:
-                        "session_create_failed"
-                            .to_string(),
+                        "session_create_failed".to_string(),
                 };
             }
 
@@ -321,8 +290,7 @@ async fn handle_message(
                 return ServerMessage::Error {
                     code: 1004,
                     message:
-                        "session_host_join_failed"
-                            .to_string(),
+                        "session_host_join_failed".to_string(),
                 };
             }
 
@@ -344,36 +312,23 @@ async fn handle_message(
                     ServerMessage::Error {
                         code: 1005,
                         message:
-                            "session_load_failed"
-                                .to_string(),
+                            "session_load_failed".to_string(),
                     }
                 }
             }
         }
 
-        // =====================================================
-        // JOIN SESSION
-        // =====================================================
-
-        ClientMessage::JoinSession {
-            session_id,
-        } => {
-            let Some(user_id) =
-                state.user_id.as_ref()
-            else {
+        ClientMessage::JoinSession { session_id } => {
+            let Some(user_id) = state.user_id.as_ref() else {
                 return ServerMessage::Error {
                     code: 1002,
                     message:
-                        "authentication_required"
-                            .to_string(),
+                        "authentication_required".to_string(),
                 };
             };
 
             let lobby =
-                sqlx::query_as::<
-                    _,
-                    (String, i32),
-                >(
+                sqlx::query_as::<_, (String, i32)>(
                     r#"
                     SELECT
                         name,
@@ -392,23 +347,21 @@ async fn handle_message(
                 return ServerMessage::Error {
                     code: 1006,
                     message:
-                        "session_not_found"
-                            .to_string(),
+                        "session_not_found".to_string(),
                 };
             };
 
-            let players: i64 =
-                sqlx::query_scalar(
-                    r#"
-                    SELECT COUNT(*)
-                    FROM lobby_players
-                    WHERE lobby_id = ?
-                    "#,
-                )
-                .bind(&session_id)
-                .fetch_one(db)
-                .await
-                .unwrap_or(0);
+            let players: i64 = sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*)
+                FROM lobby_players
+                WHERE lobby_id = ?
+                "#,
+            )
+            .bind(&session_id)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
 
             let already_joined: bool =
                 sqlx::query_scalar::<_, i64>(
@@ -459,8 +412,7 @@ async fn handle_message(
                     return ServerMessage::Error {
                         code: 1008,
                         message:
-                            "session_join_failed"
-                                .to_string(),
+                            "session_join_failed".to_string(),
                     };
                 }
             }
@@ -483,28 +435,18 @@ async fn handle_message(
                     ServerMessage::Error {
                         code: 1005,
                         message:
-                            "session_load_failed"
-                                .to_string(),
+                            "session_load_failed".to_string(),
                     }
                 }
             }
         }
 
-        // =====================================================
-        // LEAVE SESSION
-        // =====================================================
-
-        ClientMessage::LeaveSession {
-            session_id,
-        } => {
-            let Some(user_id) =
-                state.user_id.as_ref()
-            else {
+        ClientMessage::LeaveSession { session_id } => {
+            let Some(user_id) = state.user_id.as_ref() else {
                 return ServerMessage::Error {
                     code: 1002,
                     message:
-                        "authentication_required"
-                            .to_string(),
+                        "authentication_required".to_string(),
                 };
             };
 
@@ -541,8 +483,7 @@ async fn handle_message(
                     ServerMessage::Error {
                         code: 1009,
                         message:
-                            "session_leave_failed"
-                                .to_string(),
+                            "session_leave_failed".to_string(),
                     }
                 }
             }
@@ -550,17 +491,10 @@ async fn handle_message(
     }
 }
 
-// =========================================================
-// LOAD SESSION + PLAYERS
-// =========================================================
-
 async fn load_session(
     db: &SqlitePool,
     session_id: &str,
-) -> Result<
-    super::types::Session,
-    sqlx::Error,
-> {
+) -> Result<super::types::Session, sqlx::Error> {
     let exists: Option<(String,)> =
         sqlx::query_as(
             r#"
