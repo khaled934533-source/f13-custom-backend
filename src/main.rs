@@ -1,587 +1,951 @@
-use std::io;
-
-use sqlx::SqlitePool;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+use axum::{
+    extract::{Path, State},
+    http::HeaderValue,
+    routing::{get, post},
+    Json, Router,
 };
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use std::{env, net::SocketAddr};
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use super::{
-    codec::{decode_frame, encode_frame},
-    ClientMessage, ServerMessage,
+mod protocol;
+
+use protocol::{
+    ClientMessage,
+    Packet,
+    ServerMessage,
 };
 
-pub const MSG_AUTHENTICATE: u16 = 0x0001;
-pub const MSG_HEARTBEAT: u16 = 0x0002;
-pub const MSG_CREATE_SESSION: u16 = 0x0003;
-pub const MSG_JOIN_SESSION: u16 = 0x0004;
-pub const MSG_LEAVE_SESSION: u16 = 0x0005;
+#[derive(Clone)]
+struct AppState {
+    db: SqlitePool,
+    public_url: String,
+}
 
-const HEADER_SIZE: usize = 15;
-const MAX_PAYLOAD_SIZE: usize = 1024 * 1024;
-
-#[derive(Debug, Clone)]
-struct ConnectionState {
-    user_id: Option<String>,
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
     display_name: Option<String>,
-    session_id: Option<String>,
 }
 
-pub async fn run_tcp_server(
-    addr: String,
-    db: SqlitePool,
-) -> io::Result<()> {
-    let listener = TcpListener::bind(&addr).await?;
+#[derive(Debug, Deserialize)]
+struct AuthRequest {
+    token: String,
+}
 
-    println!("Protocol TCP listening on {addr}");
+#[derive(Debug, Deserialize)]
+struct LobbyCreateRequest {
+    token: String,
+    name: Option<String>,
+    max_players: Option<i32>,
+}
 
-    loop {
-        let (stream, peer) = listener.accept().await?;
+#[derive(Debug, Deserialize)]
+struct LobbyJoinRequest {
+    token: String,
+}
 
-        println!("TCP client connected: {peer}");
+#[derive(Debug, Serialize)]
+struct LoginResponse {
+    success: bool,
+    token: String,
 
-        let client_db = db.clone();
+    #[serde(rename = "userId")]
+    user_id: String,
 
-        tokio::spawn(async move {
-            if let Err(error) =
-                handle_client(stream, client_db).await
-            {
-                eprintln!(
-                    "TCP client error ({peer}): {error}"
-                );
-            }
+    #[serde(rename = "displayName")]
+    display_name: String,
 
-            println!("TCP client disconnected: {peer}");
+    status: String,
+}
+
+#[tokio::main]
+async fn main() {
+    let host = env::var("HOST")
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+
+    let port = env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string());
+
+    let public_url = env::var("PUBLIC_URL")
+        .unwrap_or_else(|_| {
+            "https://f13-custom-backend-production.up.railway.app"
+                .to_string()
         });
-    }
-}
 
-async fn handle_client(
-    mut stream: TcpStream,
-    db: SqlitePool,
-) -> Result<
-    (),
-    Box<dyn std::error::Error + Send + Sync>,
-> {
-    let mut state = ConnectionState {
-        user_id: None,
-        display_name: None,
-        session_id: None,
-    };
+    let database_url = env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite:///tmp/f13.db".to_string());
 
-    loop {
-        let mut header = [0u8; HEADER_SIZE];
+    println!("========================================");
+    println!("KLAY Friday the 13th Private Server");
+    println!("Version: 0.3.0");
+    println!("========================================");
+    println!("Host: {host}");
+    println!("Port: {port}");
+    println!("Server URL: {public_url}");
+    println!("Database: {database_url}");
+    println!("========================================");
 
-        match stream.read_exact(&mut header).await {
-            Ok(_) => {}
+    let db_path = database_url
+        .strip_prefix("sqlite://")
+        .unwrap_or(&database_url);
 
-            Err(error)
-                if error.kind()
-                    == io::ErrorKind::UnexpectedEof =>
-            {
-                return Ok(());
-            }
-
-            Err(error) => {
-                return Err(error.into());
-            }
-        }
-
-        let payload_len = u32::from_be_bytes([
-            header[11],
-            header[12],
-            header[13],
-            header[14],
-        ]) as usize;
-
-        if payload_len > MAX_PAYLOAD_SIZE {
-            return Err(
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "payload exceeds maximum size",
-                )
-                .into(),
+    if let Some(parent) =
+        std::path::Path::new(db_path).parent()
+    {
+        if let Err(error) =
+            std::fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "Failed to create database directory: {error}"
             );
         }
-
-        let mut frame =
-            Vec::with_capacity(HEADER_SIZE + payload_len);
-
-        frame.extend_from_slice(&header);
-
-        let mut payload =
-            vec![0u8; payload_len];
-
-        stream.read_exact(&mut payload).await?;
-
-        frame.extend_from_slice(&payload);
-
-        let (message_id, request_id, message):
-            (u16, u32, ClientMessage) =
-            decode_frame(&frame)?;
-
-        let response = handle_message(
-            message,
-            &db,
-            &mut state,
-        )
-        .await;
-
-        let response_message_id =
-            message_id | 0x8000;
-
-        let response_frame =
-            encode_frame(
-                response_message_id,
-                request_id,
-                &response,
-            )?;
-
-        stream
-            .write_all(&response_frame)
-            .await?;
-
-        stream.flush().await?;
     }
+
+    if !std::path::Path::new(db_path).exists() {
+        if let Err(error) =
+            std::fs::File::create(db_path)
+        {
+            eprintln!(
+                "Failed to create database: {error}"
+            );
+        }
+    }
+
+    let db = SqlitePoolOptions::new()
+        .max_connections(10)
+        .connect(&database_url)
+        .await
+        .expect(
+            "Failed to connect to SQLite database",
+        );
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS sessions (
+            user_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            last_seen TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to create sessions table");
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS lobbies (
+            lobby_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            host_user_id TEXT NOT NULL,
+            max_players INTEGER NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to create lobbies table");
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS lobby_players (
+            lobby_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (lobby_id, user_id)
+        )
+        "#,
+    )
+    .execute(&db)
+    .await
+    .expect(
+        "Failed to create lobby_players table",
+    );
+
+    println!("Database connected");
+    println!("Sessions table ready");
+    println!("Lobbies table ready");
+
+    let state = AppState {
+        db: db.clone(),
+        public_url: public_url.clone(),
+    };
+
+    // =========================================================
+    // CUSTOM TCP PROTOCOL
+    // =========================================================
+
+    let tcp_host = env::var("TCP_HOST")
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+
+    let tcp_port = env::var("TCP_PORT")
+        .unwrap_or_else(|_| "9000".to_string());
+
+    let tcp_addr = format!("{tcp_host}:{tcp_port}");
+
+    let tcp_db = db.clone();
+
+    tokio::spawn(async move {
+        if let Err(error) =
+            protocol::tcp::run_tcp_server(
+                tcp_addr,
+                tcp_db,
+            )
+            .await
+        {
+            eprintln!(
+                "Protocol TCP server stopped: {error}"
+            );
+        }
+    });
+
+    // =========================================================
+    // CORS
+    // =========================================================
+
+    let cors = CorsLayer::new()
+        .allow_origin(
+            public_url
+                .parse::<HeaderValue>()
+                .expect("Invalid PUBLIC_URL"),
+        )
+        .allow_methods(
+            tower_http::cors::Any,
+        )
+        .allow_headers(
+            tower_http::cors::Any,
+        );
+
+    // =========================================================
+    // ROUTES
+    // =========================================================
+
+    let app = Router::new()
+        .route("/", get(home_handler))
+        .route("/health", get(health_handler))
+
+        .route(
+            "/api/v1/protocol",
+            post(protocol_handler),
+        )
+
+        .route(
+            "/api/v1/login",
+            post(login_handler),
+        )
+        .route(
+            "/api/v1/auth/psn",
+            post(login_handler),
+        )
+        .route(
+            "/api/v1/session/heartbeat",
+            post(heartbeat_handler),
+        )
+        .route(
+            "/api/v1/session/validate",
+            post(validate_session_handler),
+        )
+
+        .route(
+            "/api/v1/profiles/me",
+            get(profile_handler),
+        )
+
+        .route(
+            "/api/v1/database/status",
+            get(db_check_handler),
+        )
+        .route(
+            "/api/v1/database_check",
+            get(db_check_handler),
+        )
+
+        .route(
+            "/api/v1/server/info",
+            get(server_info_handler),
+        )
+
+        .route(
+            "/api/v1/lobbies",
+            get(list_lobbies_handler),
+        )
+        .route(
+            "/api/v1/lobbies/create",
+            post(create_lobby_handler),
+        )
+        .route(
+            "/api/v1/lobbies/:lobby_id/join",
+            post(join_lobby_handler),
+        )
+        .route(
+            "/api/v1/lobbies/:lobby_id/leave",
+            post(leave_lobby_handler),
+        )
+
+        .with_state(state)
+        .layer(cors);
+
+    let addr: SocketAddr =
+        format!("{host}:{port}")
+            .parse()
+            .expect("Invalid HOST or PORT");
+
+    println!("Server listening on {addr}");
+
+    let listener =
+        tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("Failed to bind server");
+
+    axum::serve(listener, app)
+        .await
+        .expect("Server failed");
 }
 
-async fn handle_message(
-    message: ClientMessage,
-    db: &SqlitePool,
-    state: &mut ConnectionState,
-) -> ServerMessage {
-    match message {
+// =========================================================
+// HOME
+// =========================================================
+
+async fn home_handler() -> &'static str {
+    "KLAY Friday the 13th Private Server v0.3.0"
+}
+
+// =========================================================
+// HEALTH
+// =========================================================
+
+async fn health_handler(
+    State(state): State<AppState>,
+) -> Json<Value> {
+    let database = sqlx::query("SELECT 1")
+        .execute(&state.db)
+        .await
+        .is_ok();
+
+    Json(json!({
+        "status": "ok",
+        "service": "f13-custom-backend",
+        "version": "0.3.0",
+        "database": if database {
+            "connected"
+        } else {
+            "disconnected"
+        },
+        "public_url": state.public_url
+    }))
+}
+
+// =========================================================
+// PROTOCOL - HTTP TEST API
+// =========================================================
+
+async fn protocol_handler(
+    Json(packet): Json<Packet<ClientMessage>>,
+) -> Json<Packet<ServerMessage>> {
+    let response = match packet.payload {
         ClientMessage::Authenticate {
             player_id,
             player_name,
         } => {
-            let token = Uuid::new_v4().to_string();
-
-            let result = sqlx::query(
-                r#"
-                INSERT INTO sessions (
-                    user_id,
-                    display_name,
-                    token
-                )
-                VALUES (?, ?, ?)
-                ON CONFLICT(user_id)
-                DO UPDATE SET
-                    display_name = excluded.display_name,
-                    token = excluded.token,
-                    last_seen = CURRENT_TIMESTAMP
-                "#,
-            )
-            .bind(&player_id)
-            .bind(&player_name)
-            .bind(&token)
-            .execute(db)
-            .await;
-
-            match result {
-                Ok(_) => {
-                    state.user_id =
-                        Some(player_id.clone());
-
-                    state.display_name =
-                        Some(player_name.clone());
-
-                    ServerMessage::Authenticated {
-                        player: super::types::Player {
-                            id: player_id,
-                            name: player_name,
-                        },
-                    }
-                }
-
-                Err(error) => {
-                    eprintln!(
-                        "TCP authentication database error: {error}"
-                    );
-
-                    ServerMessage::Error {
-                        code: 1001,
-                        message:
-                            "authentication_failed"
-                                .to_string(),
-                    }
-                }
+            ServerMessage::Authenticated {
+                player: protocol::types::Player {
+                    id: player_id,
+                    name: player_name,
+                },
             }
-        }
-
-        ClientMessage::Heartbeat => {
-            if let Some(user_id) =
-                state.user_id.as_ref()
-            {
-                let _ = sqlx::query(
-                    r#"
-                    UPDATE sessions
-                    SET last_seen = CURRENT_TIMESTAMP
-                    WHERE user_id = ?
-                    "#,
-                )
-                .bind(user_id)
-                .execute(db)
-                .await;
-            }
-
-            ServerMessage::Pong
         }
 
         ClientMessage::CreateSession => {
-            let Some(user_id) =
-                state.user_id.as_ref()
-            else {
-                return ServerMessage::Error {
-                    code: 1002,
-                    message:
-                        "authentication_required"
-                            .to_string(),
-                };
-            };
-
-            let session_id =
-                Uuid::new_v4().to_string();
-
-            let lobby_name =
-                format!("KLAY Lobby {}", &session_id[..8]);
-
-            let max_players = 8i32;
-
-            let result = sqlx::query(
-                r#"
-                INSERT INTO lobbies (
-                    lobby_id,
-                    name,
-                    host_user_id,
-                    max_players
-                )
-                VALUES (?, ?, ?, ?)
-                "#,
-            )
-            .bind(&session_id)
-            .bind(&lobby_name)
-            .bind(user_id)
-            .bind(max_players)
-            .execute(db)
-            .await;
-
-            if let Err(error) = result {
-                eprintln!(
-                    "Failed to create TCP session: {error}"
-                );
-
-                return ServerMessage::Error {
-                    code: 1003,
-                    message:
-                        "session_create_failed"
-                            .to_string(),
-                };
-            }
-
-            let join_result = sqlx::query(
-                r#"
-                INSERT INTO lobby_players (
-                    lobby_id,
-                    user_id
-                )
-                VALUES (?, ?)
-                "#,
-            )
-            .bind(&session_id)
-            .bind(user_id)
-            .execute(db)
-            .await;
-
-            if let Err(error) = join_result {
-                eprintln!(
-                    "Failed to add session host: {error}"
-                );
-
-                let _ = sqlx::query(
-                    "DELETE FROM lobbies WHERE lobby_id = ?",
-                )
-                .bind(&session_id)
-                .execute(db)
-                .await;
-
-                return ServerMessage::Error {
-                    code: 1004,
-                    message:
-                        "session_host_join_failed"
-                            .to_string(),
-                };
-            }
-
-            state.session_id =
-                Some(session_id.clone());
-
-            match load_session(db, &session_id).await {
-                Ok(session) => {
-                    ServerMessage::SessionCreated {
-                        session,
-                    }
-                }
-
-                Err(error) => {
-                    eprintln!(
-                        "Failed to load created session: {error}"
-                    );
-
-                    ServerMessage::Error {
-                        code: 1005,
-                        message:
-                            "session_load_failed"
-                                .to_string(),
-                    }
-                }
+            ServerMessage::SessionCreated {
+                session: protocol::types::Session {
+                    id: Uuid::new_v4().to_string(),
+                    players: Vec::new(),
+                },
             }
         }
 
         ClientMessage::JoinSession {
             session_id,
         } => {
-            let Some(user_id) =
-                state.user_id.as_ref()
-            else {
-                return ServerMessage::Error {
-                    code: 1002,
-                    message:
-                        "authentication_required"
-                            .to_string(),
-                };
-            };
-
-            let lobby =
-                sqlx::query_as::<
-                    _,
-                    (String, i32),
-                >(
-                    r#"
-                    SELECT
-                        name,
-                        max_players
-                    FROM lobbies
-                    WHERE lobby_id = ?
-                    "#,
-                )
-                .bind(&session_id)
-                .fetch_optional(db)
-                .await;
-
-            let Some((_name, max_players)) =
-                lobby.ok().flatten()
-            else {
-                return ServerMessage::Error {
-                    code: 1006,
-                    message:
-                        "session_not_found"
-                            .to_string(),
-                };
-            };
-
-            let players: i64 =
-                sqlx::query_scalar(
-                    r#"
-                    SELECT COUNT(*)
-                    FROM lobby_players
-                    WHERE lobby_id = ?
-                    "#,
-                )
-                .bind(&session_id)
-                .fetch_one(db)
-                .await
-                .unwrap_or(0);
-
-            let already_joined: bool =
-                sqlx::query_scalar::<_, i64>(
-                    r#"
-                    SELECT COUNT(*)
-                    FROM lobby_players
-                    WHERE lobby_id = ?
-                    AND user_id = ?
-                    "#,
-                )
-                .bind(&session_id)
-                .bind(user_id)
-                .fetch_one(db)
-                .await
-                .unwrap_or(0)
-                    > 0;
-
-            if !already_joined
-                && players >= max_players as i64
-            {
-                return ServerMessage::Error {
-                    code: 1007,
-                    message:
-                        "session_full".to_string(),
-                };
-            }
-
-            if !already_joined {
-                let result = sqlx::query(
-                    r#"
-                    INSERT INTO lobby_players (
-                        lobby_id,
-                        user_id
-                    )
-                    VALUES (?, ?)
-                    "#,
-                )
-                .bind(&session_id)
-                .bind(user_id)
-                .execute(db)
-                .await;
-
-                if let Err(error) = result {
-                    eprintln!(
-                        "Failed to join TCP session: {error}"
-                    );
-
-                    return ServerMessage::Error {
-                        code: 1008,
-                        message:
-                            "session_join_failed"
-                                .to_string(),
-                    };
-                }
-            }
-
-            state.session_id =
-                Some(session_id.clone());
-
-            match load_session(db, &session_id).await {
-                Ok(session) => {
-                    ServerMessage::SessionJoined {
-                        session,
-                    }
-                }
-
-                Err(error) => {
-                    eprintln!(
-                        "Failed to load joined session: {error}"
-                    );
-
-                    ServerMessage::Error {
-                        code: 1005,
-                        message:
-                            "session_load_failed"
-                                .to_string(),
-                    }
-                }
+            ServerMessage::SessionJoined {
+                session:
+                    protocol::types::Session {
+                        id: session_id,
+                        players: Vec::new(),
+                    },
             }
         }
 
         ClientMessage::LeaveSession {
             session_id,
         } => {
-            let Some(user_id) =
-                state.user_id.as_ref()
-            else {
-                return ServerMessage::Error {
-                    code: 1002,
-                    message:
-                        "authentication_required"
-                            .to_string(),
-                };
-            };
-
-            let result = sqlx::query(
-                r#"
-                DELETE FROM lobby_players
-                WHERE lobby_id = ?
-                AND user_id = ?
-                "#,
-            )
-            .bind(&session_id)
-            .bind(user_id)
-            .execute(db)
-            .await;
-
-            match result {
-                Ok(_) => {
-                    if state.session_id.as_deref()
-                        == Some(&session_id)
-                    {
-                        state.session_id = None;
-                    }
-
-                    ServerMessage::SessionLeft {
-                        session_id,
-                    }
-                }
-
-                Err(error) => {
-                    eprintln!(
-                        "Failed to leave TCP session: {error}"
-                    );
-
-                    ServerMessage::Error {
-                        code: 1009,
-                        message:
-                            "session_leave_failed"
-                                .to_string(),
-                    }
-                }
+            ServerMessage::SessionLeft {
+                session_id,
             }
         }
+
+        ClientMessage::Heartbeat => {
+            ServerMessage::Pong
+        }
+    };
+
+    Json(Packet {
+        version: packet.version,
+        message_id: 0,
+        request_id: packet.request_id,
+        payload: response,
+    })
+}
+
+// =========================================================
+// LOGIN
+// =========================================================
+
+async fn login_handler(
+    State(state): State<AppState>,
+    Json(request): Json<LoginRequest>,
+) -> Json<Value> {
+    let display_name = request
+        .display_name
+        .unwrap_or_else(|| {
+            "KLAY_Player".to_string()
+        });
+
+    let user_id =
+        Uuid::new_v4().to_string();
+
+    let token =
+        Uuid::new_v4().to_string();
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO sessions (
+            user_id,
+            display_name,
+            token
+        )
+        VALUES (?, ?, ?)
+        "#,
+    )
+    .bind(&user_id)
+    .bind(&display_name)
+    .bind(&token)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = result {
+        eprintln!(
+            "Failed to create session: {error}"
+        );
+
+        return Json(json!({
+            "success": false,
+            "status": "database_error"
+        }));
+    }
+
+    println!(
+        "New session: user={} name={}",
+        user_id,
+        display_name
+    );
+
+    Json(json!(LoginResponse {
+        success: true,
+        token,
+        user_id,
+        display_name,
+        status: "success".to_string(),
+    }))
+}
+
+// =========================================================
+// HEARTBEAT
+// =========================================================
+
+async fn heartbeat_handler(
+    State(state): State<AppState>,
+    Json(request): Json<AuthRequest>,
+) -> Json<Value> {
+    let result = sqlx::query(
+        r#"
+        UPDATE sessions
+        SET last_seen = CURRENT_TIMESTAMP
+        WHERE token = ?
+        "#,
+    )
+    .bind(&request.token)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(result)
+            if result.rows_affected() > 0 =>
+        {
+            Json(json!({
+                "success": true,
+                "status": "active"
+            }))
+        }
+
+        _ => Json(json!({
+            "success": false,
+            "status": "invalid_session"
+        })),
     }
 }
 
-async fn load_session(
-    db: &SqlitePool,
-    session_id: &str,
-) -> Result<
-    super::types::Session,
-    sqlx::Error,
-> {
-    let exists: Option<(String,)> =
-        sqlx::query_as(
+// =========================================================
+// SESSION VALIDATION
+// =========================================================
+
+async fn validate_session_handler(
+    State(state): State<AppState>,
+    Json(request): Json<AuthRequest>,
+) -> Json<Value> {
+    let session =
+        sqlx::query_as::<_, (String, String)>(
             r#"
-            SELECT lobby_id
+            SELECT user_id, display_name
+            FROM sessions
+            WHERE token = ?
+            "#,
+        )
+        .bind(&request.token)
+        .fetch_optional(&state.db)
+        .await;
+
+    match session {
+        Ok(Some((user_id, display_name))) => {
+            Json(json!({
+                "success": true,
+                "valid": true,
+                "userId": user_id,
+                "displayName": display_name
+            }))
+        }
+
+        _ => Json(json!({
+            "success": true,
+            "valid": false
+        })),
+    }
+}
+
+// =========================================================
+// PROFILE
+// =========================================================
+
+async fn profile_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim_start_matches("Bearer ");
+
+    if !token.is_empty() {
+        let valid = sqlx::query(
+            "SELECT user_id FROM sessions WHERE token = ?",
+        )
+        .bind(token)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+        if !valid {
+            return Json(json!({
+                "success": false,
+                "error": "invalid_session"
+            }));
+        }
+    }
+
+    Json(json!({
+        "success": true,
+        "level": 150,
+        "cp": 999999,
+        "dlc_unlocked": true,
+        "unlocked_assets": [
+            "savini_jason",
+            "backers_clothing_pack",
+            "counselor_clothing_dlc"
+        ],
+        "customization": {
+            "perkSlots": 3,
+            "badgeSlots": 3
+        }
+    }))
+}
+
+// =========================================================
+// CREATE LOBBY
+// =========================================================
+
+async fn create_lobby_handler(
+    State(state): State<AppState>,
+    Json(request): Json<LobbyCreateRequest>,
+) -> Json<Value> {
+    let session =
+        sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT user_id, display_name
+            FROM sessions
+            WHERE token = ?
+            "#,
+        )
+        .bind(&request.token)
+        .fetch_optional(&state.db)
+        .await;
+
+    let Some((user_id, _)) =
+        session.ok().flatten()
+    else {
+        return Json(json!({
+            "success": false,
+            "error": "invalid_session"
+        }));
+    };
+
+    let lobby_id =
+        Uuid::new_v4().to_string();
+
+    let name = request
+        .name
+        .unwrap_or_else(|| {
+            "KLAY Lobby".to_string()
+        });
+
+    let max_players = request
+        .max_players
+        .unwrap_or(8)
+        .clamp(1, 8);
+
+    if sqlx::query(
+        r#"
+        INSERT INTO lobbies (
+            lobby_id,
+            name,
+            host_user_id,
+            max_players
+        )
+        VALUES (?, ?, ?, ?)
+        "#,
+    )
+    .bind(&lobby_id)
+    .bind(&name)
+    .bind(&user_id)
+    .bind(max_players)
+    .execute(&state.db)
+    .await
+    .is_err()
+    {
+        return Json(json!({
+            "success": false,
+            "error": "lobby_create_failed"
+        }));
+    }
+
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO lobby_players (
+            lobby_id,
+            user_id
+        )
+        VALUES (?, ?)
+        "#,
+    )
+    .bind(&lobby_id)
+    .bind(&user_id)
+    .execute(&state.db)
+    .await;
+
+    println!(
+        "Lobby created: {lobby_id}"
+    );
+
+    Json(json!({
+        "success": true,
+        "lobbyId": lobby_id,
+        "name": name,
+        "hostUserId": user_id,
+        "maxPlayers": max_players,
+        "players": 1
+    }))
+}
+
+// =========================================================
+// LIST LOBBIES
+// =========================================================
+
+async fn list_lobbies_handler(
+    State(state): State<AppState>,
+) -> Json<Value> {
+    let lobbies =
+        sqlx::query_as::<
+            _,
+            (String, String, String, i32),
+        >(
+            r#"
+            SELECT
+                lobby_id,
+                name,
+                host_user_id,
+                max_players
+            FROM lobbies
+            ORDER BY created_at DESC
+            "#,
+        )
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+    let mut result = Vec::new();
+
+    for (
+        lobby_id,
+        name,
+        host_user_id,
+        max_players,
+    ) in lobbies
+    {
+        let players: i64 =
+            sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*)
+                FROM lobby_players
+                WHERE lobby_id = ?
+                "#,
+            )
+            .bind(&lobby_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+
+        result.push(json!({
+            "lobbyId": lobby_id,
+            "name": name,
+            "hostUserId": host_user_id,
+            "maxPlayers": max_players,
+            "players": players
+        }));
+    }
+
+    Json(json!({
+        "success": true,
+        "lobbies": result
+    }))
+}
+
+// =========================================================
+// JOIN LOBBY
+// =========================================================
+
+async fn join_lobby_handler(
+    State(state): State<AppState>,
+    Path(lobby_id): Path<String>,
+    Json(request): Json<LobbyJoinRequest>,
+) -> Json<Value> {
+    let user_id: Option<String> =
+        sqlx::query_scalar(
+            "SELECT user_id FROM sessions WHERE token = ?",
+        )
+        .bind(&request.token)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+
+    let Some(user_id) = user_id else {
+        return Json(json!({
+            "success": false,
+            "error": "invalid_session"
+        }));
+    };
+
+    let lobby =
+        sqlx::query_as::<_, (String, i32)>(
+            r#"
+            SELECT name, max_players
             FROM lobbies
             WHERE lobby_id = ?
             "#,
         )
-        .bind(session_id)
-        .fetch_optional(db)
-        .await?;
+        .bind(&lobby_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
 
-    if exists.is_none() {
-        return Err(sqlx::Error::RowNotFound);
+    let Some((name, max_players)) =
+        lobby
+    else {
+        return Json(json!({
+            "success": false,
+            "error": "lobby_not_found"
+        }));
+    };
+
+    let players: i64 =
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?",
+        )
+        .bind(&lobby_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+
+    if players >= max_players as i64 {
+        return Json(json!({
+            "success": false,
+            "error": "lobby_full"
+        }));
     }
 
-    let rows =
-        sqlx::query_as::<_, (String, String)>(
-            r#"
-            SELECT
-                s.user_id,
-                s.display_name
-            FROM lobby_players lp
-            INNER JOIN sessions s
-                ON s.user_id = lp.user_id
-            WHERE lp.lobby_id = ?
-            ORDER BY lp.joined_at ASC
-            "#,
+    let result = sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO lobby_players (
+            lobby_id,
+            user_id
         )
-        .bind(session_id)
-        .fetch_all(db)
-        .await?;
+        VALUES (?, ?)
+        "#,
+    )
+    .bind(&lobby_id)
+    .bind(&user_id)
+    .execute(&state.db)
+    .await;
 
-    let players = rows
-        .into_iter()
-        .map(|(id, name)| {
-            super::types::Player {
-                id,
-                name,
-            }
-        })
-        .collect();
+    if result.is_err() {
+        return Json(json!({
+            "success": false,
+            "error": "join_failed"
+        }));
+    }
 
-    Ok(super::types::Session {
-        id: session_id.to_string(),
-        players,
-    })
+    Json(json!({
+        "success": true,
+        "lobbyId": lobby_id,
+        "name": name,
+        "players": players + 1,
+        "maxPlayers": max_players
+    }))
+}
+
+// =========================================================
+// LEAVE LOBBY
+// =========================================================
+
+async fn leave_lobby_handler(
+    State(state): State<AppState>,
+    Path(lobby_id): Path<String>,
+    Json(request): Json<LobbyJoinRequest>,
+) -> Json<Value> {
+    let user_id: Option<String> =
+        sqlx::query_scalar(
+            "SELECT user_id FROM sessions WHERE token = ?",
+        )
+        .bind(&request.token)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+
+    let Some(user_id) = user_id else {
+        return Json(json!({
+            "success": false,
+            "error": "invalid_session"
+        }));
+    };
+
+    let result = sqlx::query(
+        r#"
+        DELETE FROM lobby_players
+        WHERE lobby_id = ? AND user_id = ?
+        "#,
+    )
+    .bind(&lobby_id)
+    .bind(&user_id)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(result) => Json(json!({
+            "success": true,
+            "removed": result.rows_affected() > 0
+        })),
+
+        Err(error) => {
+            eprintln!(
+                "Failed to leave lobby: {error}"
+            );
+
+            Json(json!({
+                "success": false,
+                "error": "leave_failed"
+            }))
+        }
+    }
+}
+
+// =========================================================
+// DATABASE CHECK
+// =========================================================
+
+async fn db_check_handler(
+    State(state): State<AppState>,
+) -> Json<Value> {
+    let connected = sqlx::query("SELECT 1")
+        .execute(&state.db)
+        .await
+        .is_ok();
+
+    Json(json!({
+        "status": if connected {
+            "online"
+        } else {
+            "degraded"
+        },
+        "database": if connected {
+            "connected"
+        } else {
+            "disconnected"
+        },
+        "healthy": connected
+    }))
+}
+
+// =========================================================
+// SERVER INFO
+// =========================================================
+
+async fn server_info_handler(
+    State(state): State<AppState>,
+) -> Json<Value> {
+    Json(json!({
+        "name": "KLAY Friday the 13th Private Server",
+        "status": "online",
+        "backend": "rust-axum",
+        "database": "sqlite",
+        "public_url": state.public_url,
+        "version": "0.3.0",
+        "features": [
+            "sessions",
+            "heartbeat",
+            "session_validation",
+            "lobbies",
+            "lobby_join",
+            "lobby_leave",
+            "protocol",
+            "custom_tcp_protocol"
+        ]
+    }))
 }
