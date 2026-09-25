@@ -17,6 +17,10 @@ tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
 
+# Protocol / networking
+bytes = "1"
+thiserror = "2"
+
 [[bin]]
 name = "ccl-server"
 path = "src/main.rs"
