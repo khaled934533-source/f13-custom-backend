@@ -8,7 +8,8 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{
-    codec::{decode_frame, encode_frame},
+    codec::{decode_frame, encode_frame, HEADER_SIZE, MAX_PAYLOAD_SIZE},
+    types::{Player, Session},
     ClientMessage, ServerMessage,
 };
 
@@ -17,15 +18,16 @@ pub const MSG_HEARTBEAT: u16 = 0x0002;
 pub const MSG_CREATE_SESSION: u16 = 0x0003;
 pub const MSG_JOIN_SESSION: u16 = 0x0004;
 pub const MSG_LEAVE_SESSION: u16 = 0x0005;
-
-const HEADER_SIZE: usize = 15;
-const MAX_PAYLOAD_SIZE: usize = 1024 * 1024;
+pub const MSG_SET_READY: u16 = 0x0006;
+pub const MSG_START_SESSION: u16 = 0x0007;
 
 #[derive(Debug, Clone)]
 struct ConnectionState {
     user_id: Option<String>,
     display_name: Option<String>,
     session_id: Option<String>,
+    ready: bool,
+    started: bool,
 }
 
 pub async fn run_tcp_server(
@@ -65,6 +67,8 @@ async fn handle_client(
         user_id: None,
         display_name: None,
         session_id: None,
+        ready: false,
+        started: false,
     };
 
     loop {
@@ -251,6 +255,8 @@ async fn cleanup_connection(
     }
 
     state.session_id = None;
+    state.ready = false;
+    state.started = false;
 }
 
 async fn handle_message(
@@ -294,12 +300,17 @@ async fn handle_message(
                     state.display_name =
                         Some(player_name.clone());
 
+                    state.ready = false;
+                    state.started = false;
+
+                    let _ = token;
+
                     ServerMessage::Authenticated {
-                        player:
-                            super::types::Player {
-                                id: player_id,
-                                name: player_name,
-                            },
+                        player: Player {
+                            id: player_id,
+                            name: player_name,
+                            ready: false,
+                        },
                     }
                 }
 
@@ -428,9 +439,13 @@ async fn handle_message(
             state.session_id =
                 Some(session_id.clone());
 
+            state.ready = false;
+            state.started = false;
+
             match load_session(
                 db,
                 &session_id,
+                state.started,
             )
             .await
             {
@@ -570,9 +585,13 @@ async fn handle_message(
             state.session_id =
                 Some(session_id.clone());
 
+            state.ready = false;
+            state.started = false;
+
             match load_session(
                 db,
                 &session_id,
+                state.started,
             )
             .await
             {
@@ -632,6 +651,8 @@ async fn handle_message(
                     {
                         state.session_id =
                             None;
+                        state.ready = false;
+                        state.started = false;
                     }
 
                     let remaining_players:
@@ -680,16 +701,136 @@ async fn handle_message(
                 }
             }
         }
+
+        ClientMessage::SetReady { ready } => {
+            let Some(user_id) =
+                state.user_id.as_ref()
+            else {
+                return ServerMessage::Error {
+                    code: 1002,
+                    message:
+                        "authentication_required"
+                            .to_string(),
+                };
+            };
+
+            if state.session_id.is_none() {
+                return ServerMessage::Error {
+                    code: 1010,
+                    message:
+                        "session_required"
+                            .to_string(),
+                };
+            }
+
+            if state.started {
+                return ServerMessage::Error {
+                    code: 1011,
+                    message:
+                        "session_already_started"
+                            .to_string(),
+                };
+            }
+
+            state.ready = ready;
+
+            ServerMessage::ReadyChanged {
+                player_id: user_id.clone(),
+                ready,
+            }
+        }
+
+        ClientMessage::StartSession => {
+            let Some(user_id) =
+                state.user_id.as_ref()
+            else {
+                return ServerMessage::Error {
+                    code: 1002,
+                    message:
+                        "authentication_required"
+                            .to_string(),
+                };
+            };
+
+            let Some(session_id) =
+                state.session_id.clone()
+            else {
+                return ServerMessage::Error {
+                    code: 1010,
+                    message:
+                        "session_required"
+                            .to_string(),
+                };
+            };
+
+            let host_user_id =
+                sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT host_user_id
+                    FROM lobbies
+                    WHERE lobby_id = ?
+                    "#,
+                )
+                .bind(&session_id)
+                .fetch_optional(db)
+                .await;
+
+            let Some(host_user_id) =
+                host_user_id.ok().flatten()
+            else {
+                return ServerMessage::Error {
+                    code: 1006,
+                    message:
+                        "session_not_found"
+                            .to_string(),
+                };
+            };
+
+            if host_user_id != *user_id {
+                return ServerMessage::Error {
+                    code: 1012,
+                    message:
+                        "host_required"
+                            .to_string(),
+                };
+            }
+
+            let player_count: i64 =
+                sqlx::query_scalar(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM lobby_players
+                    WHERE lobby_id = ?
+                    "#,
+                )
+                .bind(&session_id)
+                .fetch_one(db)
+                .await
+                .unwrap_or(0);
+
+            if player_count == 0 {
+                return ServerMessage::Error {
+                    code: 1013,
+                    message:
+                        "session_empty"
+                            .to_string(),
+                };
+            }
+
+            state.started = true;
+
+            ServerMessage::SessionStarted {
+                session_id,
+            }
+        }
     }
 }
 
 async fn load_session(
     db: &SqlitePool,
     session_id: &str,
-) -> Result<
-    super::types::Session,
-    sqlx::Error,
-> {
+    started: bool,
+) -> Result<Session, sqlx::Error> {
     let exists: Option<(String,)> =
         sqlx::query_as(
             r#"
@@ -728,15 +869,17 @@ async fn load_session(
     let players = rows
         .into_iter()
         .map(|(id, name)| {
-            super::types::Player {
+            Player {
                 id,
                 name,
+                ready: false,
             }
         })
         .collect();
 
-    Ok(super::types::Session {
+    Ok(Session {
         id: session_id.to_string(),
         players,
+        started,
     })
 }
