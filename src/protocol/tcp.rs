@@ -5,7 +5,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
-use uuid::Uuid;
 
 use super::{
     codec::{decode_frame, encode_frame, HEADER_SIZE, MAX_PAYLOAD_SIZE},
@@ -54,7 +53,9 @@ pub async fn run_tcp_server(
                 );
             }
 
-            println!("TCP client disconnected: {peer}");
+            println!(
+                "TCP client disconnected: {peer}"
+            );
         });
     }
 }
@@ -111,7 +112,9 @@ async fn handle_client(
         }
 
         let mut frame =
-            Vec::with_capacity(HEADER_SIZE + payload_len);
+            Vec::with_capacity(
+                HEADER_SIZE + payload_len,
+            );
 
         frame.extend_from_slice(&header);
 
@@ -144,6 +147,34 @@ async fn handle_client(
                     return Err(error);
                 }
             };
+
+        let expected_message_id =
+            client_message_id(&message);
+
+        if message_id != expected_message_id {
+            let response =
+                ServerMessage::Error {
+                    code: 1099,
+                    message:
+                        "message_id_mismatch"
+                            .to_string(),
+                };
+
+            let response_frame =
+                encode_frame(
+                    message_id | 0x8000,
+                    request_id,
+                    &response,
+                )?;
+
+            stream
+                .write_all(&response_frame)
+                .await?;
+
+            stream.flush().await?;
+
+            continue;
+        }
 
         let response = handle_message(
             message,
@@ -178,16 +209,45 @@ async fn handle_client(
     }
 }
 
+fn client_message_id(
+    message: &ClientMessage,
+) -> u16 {
+    match message {
+        ClientMessage::Authenticate { .. } =>
+            MSG_AUTHENTICATE,
+
+        ClientMessage::Heartbeat =>
+            MSG_HEARTBEAT,
+
+        ClientMessage::CreateSession =>
+            MSG_CREATE_SESSION,
+
+        ClientMessage::JoinSession { .. } =>
+            MSG_JOIN_SESSION,
+
+        ClientMessage::LeaveSession { .. } =>
+            MSG_LEAVE_SESSION,
+
+        ClientMessage::SetReady { .. } =>
+            MSG_SET_READY,
+
+        ClientMessage::StartSession =>
+            MSG_START_SESSION,
+    }
+}
+
 async fn cleanup_connection(
     db: &SqlitePool,
     state: &mut ConnectionState,
 ) {
-    let Some(user_id) = state.user_id.as_ref()
+    let Some(user_id) =
+        state.user_id.as_ref()
     else {
         return;
     };
 
-    let Some(session_id) = state.session_id.as_ref()
+    let Some(session_id) =
+        state.session_id.as_ref()
     else {
         return;
     };
@@ -196,7 +256,7 @@ async fn cleanup_connection(
         "Cleaning up disconnected player: user_id={user_id}, session_id={session_id}"
     );
 
-    let delete_result = sqlx::query(
+    let result = sqlx::query(
         r#"
         DELETE FROM lobby_players
         WHERE lobby_id = ?
@@ -208,7 +268,7 @@ async fn cleanup_connection(
     .execute(db)
     .await;
 
-    if let Err(error) = delete_result {
+    if let Err(error) = result {
         eprintln!(
             "Failed to cleanup disconnected player: {error}"
         );
@@ -216,7 +276,7 @@ async fn cleanup_connection(
         return;
     }
 
-    let remaining_players: i64 =
+    let remaining: i64 =
         sqlx::query_scalar(
             r#"
             SELECT COUNT(*)
@@ -229,29 +289,16 @@ async fn cleanup_connection(
         .await
         .unwrap_or(0);
 
-    if remaining_players == 0 {
-        let delete_lobby_result =
-            sqlx::query(
-                r#"
-                DELETE FROM lobbies
-                WHERE lobby_id = ?
-                "#,
-            )
-            .bind(session_id)
-            .execute(db)
-            .await;
-
-        if let Err(error) =
-            delete_lobby_result
-        {
-            eprintln!(
-                "Failed to delete empty lobby: {error}"
-            );
-        } else {
-            println!(
-                "Deleted empty lobby: {session_id}"
-            );
-        }
+    if remaining == 0 {
+        let _ = sqlx::query(
+            r#"
+            DELETE FROM lobbies
+            WHERE lobby_id = ?
+            "#,
+        )
+        .bind(session_id)
+        .execute(db)
+        .await;
     }
 
     state.session_id = None;
@@ -269,8 +316,16 @@ async fn handle_message(
             player_id,
             player_name,
         } => {
-            let token =
-                Uuid::new_v4().to_string();
+            if player_id.trim().is_empty()
+                || player_name.trim().is_empty()
+            {
+                return ServerMessage::Error {
+                    code: 1014,
+                    message:
+                        "invalid_player_identity"
+                            .to_string(),
+                };
+            }
 
             let result = sqlx::query(
                 r#"
@@ -282,13 +337,17 @@ async fn handle_message(
                 VALUES (?, ?, ?)
                 ON CONFLICT(user_id)
                 DO UPDATE SET
-                    display_name = excluded.display_name,
-                    token = excluded.token,
-                    last_seen = CURRENT_TIMESTAMP
+                    display_name =
+                        excluded.display_name,
+                    token =
+                        excluded.token,
+                    last_seen =
+                        CURRENT_TIMESTAMP
                 "#,
             )
             .bind(&player_id)
             .bind(&player_name)
+            .bind("klay-session")
             .execute(db)
             .await;
 
@@ -302,8 +361,6 @@ async fn handle_message(
 
                     state.ready = false;
                     state.started = false;
-
-                    let _ = token;
 
                     ServerMessage::Authenticated {
                         player: Player {
@@ -336,7 +393,8 @@ async fn handle_message(
                 let _ = sqlx::query(
                     r#"
                     UPDATE sessions
-                    SET last_seen = CURRENT_TIMESTAMP
+                    SET last_seen =
+                        CURRENT_TIMESTAMP
                     WHERE user_id = ?
                     "#,
                 )
@@ -350,7 +408,7 @@ async fn handle_message(
 
         ClientMessage::CreateSession => {
             let Some(user_id) =
-                state.user_id.as_ref()
+                state.user_id.clone()
             else {
                 return ServerMessage::Error {
                     code: 1002,
@@ -360,16 +418,23 @@ async fn handle_message(
                 };
             };
 
+            if state.session_id.is_some() {
+                return ServerMessage::Error {
+                    code: 1015,
+                    message:
+                        "already_in_session"
+                            .to_string(),
+                };
+            }
+
             let session_id =
-                Uuid::new_v4().to_string();
+                uuid::Uuid::new_v4().to_string();
 
             let lobby_name =
                 format!(
                     "KLAY Lobby {}",
                     &session_id[..8]
                 );
-
-            let max_players = 8i32;
 
             let result = sqlx::query(
                 r#"
@@ -384,14 +449,14 @@ async fn handle_message(
             )
             .bind(&session_id)
             .bind(&lobby_name)
-            .bind(user_id)
-            .bind(max_players)
+            .bind(&user_id)
+            .bind(8i32)
             .execute(db)
             .await;
 
             if let Err(error) = result {
                 eprintln!(
-                    "Failed to create TCP session: {error}"
+                    "Failed to create session: {error}"
                 );
 
                 return ServerMessage::Error {
@@ -402,7 +467,7 @@ async fn handle_message(
                 };
             }
 
-            let join_result = sqlx::query(
+            let result = sqlx::query(
                 r#"
                 INSERT INTO lobby_players (
                     lobby_id,
@@ -412,11 +477,11 @@ async fn handle_message(
                 "#,
             )
             .bind(&session_id)
-            .bind(user_id)
+            .bind(&user_id)
             .execute(db)
             .await;
 
-            if let Err(error) = join_result {
+            if let Err(error) = result {
                 eprintln!(
                     "Failed to add session host: {error}"
                 );
@@ -445,7 +510,7 @@ async fn handle_message(
             match load_session(
                 db,
                 &session_id,
-                state.started,
+                false,
             )
             .await
             {
@@ -455,11 +520,7 @@ async fn handle_message(
                     }
                 }
 
-                Err(error) => {
-                    eprintln!(
-                        "Failed to load created session: {error}"
-                    );
-
+                Err(_) => {
                     ServerMessage::Error {
                         code: 1005,
                         message:
@@ -474,7 +535,7 @@ async fn handle_message(
             session_id,
         } => {
             let Some(user_id) =
-                state.user_id.as_ref()
+                state.user_id.clone()
             else {
                 return ServerMessage::Error {
                     code: 1002,
@@ -485,14 +546,9 @@ async fn handle_message(
             };
 
             let lobby =
-                sqlx::query_as::<
-                    _,
-                    (String, i32),
-                >(
+                sqlx::query_as::<_, (String, i32)>(
                     r#"
-                    SELECT
-                        name,
-                        max_players
+                    SELECT name, max_players
                     FROM lobbies
                     WHERE lobby_id = ?
                     "#,
@@ -512,7 +568,7 @@ async fn handle_message(
                 };
             };
 
-            let players: i64 =
+            let count: i64 =
                 sqlx::query_scalar(
                     r#"
                     SELECT COUNT(*)
@@ -525,26 +581,7 @@ async fn handle_message(
                 .await
                 .unwrap_or(0);
 
-            let already_joined: bool =
-                sqlx::query_scalar::<_, i64>(
-                    r#"
-                    SELECT COUNT(*)
-                    FROM lobby_players
-                    WHERE lobby_id = ?
-                    AND user_id = ?
-                    "#,
-                )
-                .bind(&session_id)
-                .bind(user_id)
-                .fetch_one(db)
-                .await
-                .unwrap_or(0)
-                    > 0;
-
-            if !already_joined
-                && players
-                    >= max_players as i64
-            {
+            if count >= max_players as i64 {
                 return ServerMessage::Error {
                     code: 1007,
                     message:
@@ -553,7 +590,22 @@ async fn handle_message(
                 };
             }
 
-            if !already_joined {
+            let already_joined: i64 =
+                sqlx::query_scalar(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM lobby_players
+                    WHERE lobby_id = ?
+                    AND user_id = ?
+                    "#,
+                )
+                .bind(&session_id)
+                .bind(&user_id)
+                .fetch_one(db)
+                .await
+                .unwrap_or(0);
+
+            if already_joined == 0 {
                 let result = sqlx::query(
                     r#"
                     INSERT INTO lobby_players (
@@ -564,13 +616,13 @@ async fn handle_message(
                     "#,
                 )
                 .bind(&session_id)
-                .bind(user_id)
+                .bind(&user_id)
                 .execute(db)
                 .await;
 
                 if let Err(error) = result {
                     eprintln!(
-                        "Failed to join TCP session: {error}"
+                        "Failed to join session: {error}"
                     );
 
                     return ServerMessage::Error {
@@ -591,7 +643,7 @@ async fn handle_message(
             match load_session(
                 db,
                 &session_id,
-                state.started,
+                false,
             )
             .await
             {
@@ -601,11 +653,7 @@ async fn handle_message(
                     }
                 }
 
-                Err(error) => {
-                    eprintln!(
-                        "Failed to load joined session: {error}"
-                    );
-
+                Err(_) => {
                     ServerMessage::Error {
                         code: 1005,
                         message:
@@ -620,7 +668,7 @@ async fn handle_message(
             session_id,
         } => {
             let Some(user_id) =
-                state.user_id.as_ref()
+                state.user_id.clone()
             else {
                 return ServerMessage::Error {
                     code: 1002,
@@ -638,73 +686,61 @@ async fn handle_message(
                 "#,
             )
             .bind(&session_id)
-            .bind(user_id)
+            .bind(&user_id)
             .execute(db)
             .await;
 
-            match result {
-                Ok(_) => {
-                    if state
-                        .session_id
-                        .as_deref()
-                        == Some(&session_id)
-                    {
-                        state.session_id =
-                            None;
-                        state.ready = false;
-                        state.started = false;
-                    }
+            if let Err(error) = result {
+                eprintln!(
+                    "Failed to leave session: {error}"
+                );
 
-                    let remaining_players:
-                        i64 =
-                        sqlx::query_scalar(
-                            r#"
-                            SELECT COUNT(*)
-                            FROM lobby_players
-                            WHERE lobby_id = ?
-                            "#,
-                        )
-                        .bind(&session_id)
-                        .fetch_one(db)
-                        .await
-                        .unwrap_or(0);
+                return ServerMessage::Error {
+                    code: 1009,
+                    message:
+                        "session_leave_failed"
+                            .to_string(),
+                };
+            }
 
-                    if remaining_players == 0 {
-                        let _ =
-                            sqlx::query(
-                                r#"
-                                DELETE FROM lobbies
-                                WHERE lobby_id = ?
-                                "#,
-                            )
-                            .bind(&session_id)
-                            .execute(db)
-                            .await;
-                    }
+            if state.session_id.as_deref()
+                == Some(session_id.as_str())
+            {
+                state.session_id = None;
+                state.ready = false;
+                state.started = false;
+            }
 
-                    ServerMessage::SessionLeft {
-                        session_id,
-                    }
-                }
+            let remaining: i64 =
+                sqlx::query_scalar(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM lobby_players
+                    WHERE lobby_id = ?
+                    "#,
+                )
+                .bind(&session_id)
+                .fetch_one(db)
+                .await
+                .unwrap_or(0);
 
-                Err(error) => {
-                    eprintln!(
-                        "Failed to leave TCP session: {error}"
-                    );
+            if remaining == 0 {
+                let _ = sqlx::query(
+                    "DELETE FROM lobbies WHERE lobby_id = ?",
+                )
+                .bind(&session_id)
+                .execute(db)
+                .await;
+            }
 
-                    ServerMessage::Error {
-                        code: 1009,
-                        message:
-                            "session_leave_failed"
-                                .to_string(),
-                    }
-                }
+            ServerMessage::SessionLeft {
+                session_id,
             }
         }
 
         ClientMessage::SetReady { ready } => {
             let Some(user_id) =
-                state.user_id.as_ref()
+                state.user_id.clone()
             else {
                 return ServerMessage::Error {
                     code: 1002,
@@ -735,14 +771,14 @@ async fn handle_message(
             state.ready = ready;
 
             ServerMessage::ReadyChanged {
-                player_id: user_id.clone(),
+                player_id: user_id,
                 ready,
             }
         }
 
         ClientMessage::StartSession => {
             let Some(user_id) =
-                state.user_id.as_ref()
+                state.user_id.clone()
             else {
                 return ServerMessage::Error {
                     code: 1002,
@@ -763,7 +799,7 @@ async fn handle_message(
                 };
             };
 
-            let host_user_id =
+            let host =
                 sqlx::query_scalar::<_, String>(
                     r#"
                     SELECT host_user_id
@@ -776,7 +812,7 @@ async fn handle_message(
                 .await;
 
             let Some(host_user_id) =
-                host_user_id.ok().flatten()
+                host.ok().flatten()
             else {
                 return ServerMessage::Error {
                     code: 1006,
@@ -786,7 +822,7 @@ async fn handle_message(
                 };
             };
 
-            if host_user_id != *user_id {
+            if host_user_id != user_id {
                 return ServerMessage::Error {
                     code: 1012,
                     message:
@@ -795,7 +831,7 @@ async fn handle_message(
                 };
             }
 
-            let player_count: i64 =
+            let players: i64 =
                 sqlx::query_scalar(
                     r#"
                     SELECT COUNT(*)
@@ -808,7 +844,7 @@ async fn handle_message(
                 .await
                 .unwrap_or(0);
 
-            if player_count == 0 {
+            if players == 0 {
                 return ServerMessage::Error {
                     code: 1013,
                     message:
@@ -868,12 +904,10 @@ async fn load_session(
 
     let players = rows
         .into_iter()
-        .map(|(id, name)| {
-            Player {
-                id,
-                name,
-                ready: false,
-            }
+        .map(|(id, name)| Player {
+            id,
+            name,
+            ready: false,
         })
         .collect();
 
