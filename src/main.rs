@@ -11,6 +11,14 @@ use std::{env, net::SocketAddr};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
+mod protocol;
+
+use protocol::{
+    ClientMessage,
+    Packet,
+    ServerMessage,
+};
+
 #[derive(Clone)]
 struct AppState {
     db: SqlitePool,
@@ -168,6 +176,9 @@ async fn main() {
         .route("/", get(home_handler))
         .route("/health", get(health_handler))
 
+        // Protocol
+        .route("/api/v1/protocol", post(protocol_handler))
+
         // Authentication
         .route("/api/v1/login", post(login_handler))
         .route("/api/v1/auth/psn", post(login_handler))
@@ -224,10 +235,74 @@ async fn health_handler(
         "status": "ok",
         "service": "f13-custom-backend",
         "version": "0.3.0",
-        "database": if database { "connected" } else { "disconnected" },
+        "database": if database {
+            "connected"
+        } else {
+            "disconnected"
+        },
         "public_url": state.public_url
     }))
 }
+
+/* =========================================================
+   PROTOCOL
+   ========================================================= */
+
+async fn protocol_handler(
+    Json(packet): Json<Packet<ClientMessage>>,
+) -> Json<Packet<ServerMessage>> {
+    let response = match packet.payload {
+        ClientMessage::Authenticate {
+            player_id,
+            player_name,
+        } => {
+            ServerMessage::Authenticated {
+                player: protocol::types::Player {
+                    id: player_id,
+                    name: player_name,
+                },
+            }
+        }
+
+        ClientMessage::CreateSession => {
+            ServerMessage::SessionCreated {
+                session: protocol::types::Session {
+                    id: Uuid::new_v4().to_string(),
+                    players: Vec::new(),
+                },
+            }
+        }
+
+        ClientMessage::JoinSession { session_id } => {
+            ServerMessage::SessionJoined {
+                session: protocol::types::Session {
+                    id: session_id,
+                    players: Vec::new(),
+                },
+            }
+        }
+
+        ClientMessage::LeaveSession { session_id } => {
+            ServerMessage::SessionLeft {
+                session_id,
+            }
+        }
+
+        ClientMessage::Heartbeat => {
+            ServerMessage::Pong
+        }
+    };
+
+    Json(Packet {
+        version: packet.version,
+        request_id: packet.request_id,
+        payload: response,
+    })
+}
+
+/* =========================================================
+   LOGIN
+   ========================================================= */
 
 async fn login_handler(
     State(state): State<AppState>,
@@ -279,6 +354,10 @@ async fn login_handler(
     }))
 }
 
+/* =========================================================
+   HEARTBEAT
+   ========================================================= */
+
 async fn heartbeat_handler(
     State(state): State<AppState>,
     Json(request): Json<AuthRequest>,
@@ -309,14 +388,15 @@ async fn heartbeat_handler(
     }
 }
 
+/* =========================================================
+   SESSION VALIDATION
+   ========================================================= */
+
 async fn validate_session_handler(
     State(state): State<AppState>,
     Json(request): Json<AuthRequest>,
 ) -> Json<Value> {
-    let session = sqlx::query_as::<
-        _,
-        (String, String)
-    >(
+    let session = sqlx::query_as::<_, (String, String)>(
         r#"
         SELECT user_id, display_name
         FROM sessions
@@ -344,6 +424,10 @@ async fn validate_session_handler(
     }
 }
 
+/* =========================================================
+   PROFILE
+   ========================================================= */
+
 async fn profile_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -356,7 +440,7 @@ async fn profile_handler(
 
     if !token.is_empty() {
         let valid = sqlx::query(
-            "SELECT user_id FROM sessions WHERE token = ?"
+            "SELECT user_id FROM sessions WHERE token = ?",
         )
         .bind(token)
         .fetch_optional(&state.db)
@@ -390,14 +474,15 @@ async fn profile_handler(
     }))
 }
 
+/* =========================================================
+   CREATE LOBBY
+   ========================================================= */
+
 async fn create_lobby_handler(
     State(state): State<AppState>,
     Json(request): Json<LobbyCreateRequest>,
 ) -> Json<Value> {
-    let session = sqlx::query_as::<
-        _,
-        (String, String)
-    >(
+    let session = sqlx::query_as::<_, (String, String)>(
         r#"
         SELECT user_id, display_name
         FROM sessions
@@ -477,13 +562,14 @@ async fn create_lobby_handler(
     }))
 }
 
+/* =========================================================
+   LIST LOBBIES
+   ========================================================= */
+
 async fn list_lobbies_handler(
     State(state): State<AppState>,
 ) -> Json<Value> {
-    let lobbies = sqlx::query_as::<
-        _,
-        (String, String, String, i32)
-    >(
+    let lobbies = sqlx::query_as::<_, (String, String, String, i32)>(
         r#"
         SELECT
             lobby_id,
@@ -528,13 +614,17 @@ async fn list_lobbies_handler(
     }))
 }
 
+/* =========================================================
+   JOIN LOBBY
+   ========================================================= */
+
 async fn join_lobby_handler(
     State(state): State<AppState>,
     Path(lobby_id): Path<String>,
     Json(request): Json<LobbyJoinRequest>,
 ) -> Json<Value> {
     let user_id: Option<String> = sqlx::query_scalar(
-        "SELECT user_id FROM sessions WHERE token = ?"
+        "SELECT user_id FROM sessions WHERE token = ?",
     )
     .bind(&request.token)
     .fetch_optional(&state.db)
@@ -548,10 +638,7 @@ async fn join_lobby_handler(
         }));
     };
 
-    let lobby = sqlx::query_as::<
-        _,
-        (String, i32)
-    >(
+    let lobby = sqlx::query_as::<_, (String, i32)>(
         r#"
         SELECT name, max_players
         FROM lobbies
@@ -572,7 +659,7 @@ async fn join_lobby_handler(
     };
 
     let players: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?"
+        "SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?",
     )
     .bind(&lobby_id)
     .fetch_one(&state.db)
@@ -616,13 +703,17 @@ async fn join_lobby_handler(
     }))
 }
 
+/* =========================================================
+   LEAVE LOBBY
+   ========================================================= */
+
 async fn leave_lobby_handler(
     State(state): State<AppState>,
     Path(lobby_id): Path<String>,
     Json(request): Json<LobbyJoinRequest>,
 ) -> Json<Value> {
     let user_id: Option<String> = sqlx::query_scalar(
-        "SELECT user_id FROM sessions WHERE token = ?"
+        "SELECT user_id FROM sessions WHERE token = ?",
     )
     .bind(&request.token)
     .fetch_optional(&state.db)
@@ -664,6 +755,10 @@ async fn leave_lobby_handler(
     }
 }
 
+/* =========================================================
+   DATABASE CHECK
+   ========================================================= */
+
 async fn db_check_handler(
     State(state): State<AppState>,
 ) -> Json<Value> {
@@ -687,6 +782,10 @@ async fn db_check_handler(
     }))
 }
 
+/* =========================================================
+   SERVER INFO
+   ========================================================= */
+
 async fn server_info_handler(
     State(state): State<AppState>,
 ) -> Json<Value> {
@@ -703,7 +802,8 @@ async fn server_info_handler(
             "session_validation",
             "lobbies",
             "lobby_join",
-            "lobby_leave"
+            "lobby_leave",
+            "protocol"
         ]
     }))
 }
