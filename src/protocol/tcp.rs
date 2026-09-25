@@ -60,10 +60,7 @@ pub async fn run_tcp_server(
 async fn handle_client(
     mut stream: TcpStream,
     db: SqlitePool,
-) -> Result<
-    (),
-    Box<dyn std::error::Error + Send + Sync>,
-> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut state = ConnectionState {
         user_id: None,
         display_name: None,
@@ -80,10 +77,12 @@ async fn handle_client(
                 if error.kind()
                     == io::ErrorKind::UnexpectedEof =>
             {
+                cleanup_connection(&db, &mut state).await;
                 return Ok(());
             }
 
             Err(error) => {
+                cleanup_connection(&db, &mut state).await;
                 return Err(error.into());
             }
         }
@@ -96,6 +95,8 @@ async fn handle_client(
         ]) as usize;
 
         if payload_len > MAX_PAYLOAD_SIZE {
+            cleanup_connection(&db, &mut state).await;
+
             return Err(
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -113,27 +114,14 @@ async fn handle_client(
         let mut payload =
             vec![0u8; payload_len];
 
-        stream.read_exact(&mut payload).await?;
+        if let Err(error) =
+            stream.read_exact(&mut payload).await
+        {
+            cleanup_connection(&db, &mut state).await;
+            return Err(error.into());
+        }
 
         frame.extend_from_slice(&payload);
-
-        // =====================================================
-        // DEBUG: PRINT RAW TCP PAYLOAD
-        // =====================================================
-
-        println!(
-            "TCP RAW PAYLOAD: {}",
-            String::from_utf8_lossy(&payload)
-        );
-
-        println!(
-            "TCP PAYLOAD LENGTH: {}",
-            payload_len
-        );
-
-        // =====================================================
-        // DECODE PACKET
-        // =====================================================
 
         let decoded =
             decode_frame::<ClientMessage>(&frame);
@@ -143,28 +131,15 @@ async fn handle_client(
                 Ok(value) => value,
 
                 Err(error) => {
-                    eprintln!(
-                        "TCP DECODE ERROR: {error}"
-                    );
-
-                    eprintln!(
-                        "TCP RAW PAYLOAD BYTES: {:?}",
-                        payload
-                    );
+                    cleanup_connection(
+                        &db,
+                        &mut state,
+                    )
+                    .await;
 
                     return Err(error);
                 }
             };
-
-        println!(
-            "TCP MESSAGE ID: {}",
-            message_id
-        );
-
-        println!(
-            "TCP REQUEST ID: {}",
-            request_id
-        );
 
         let response = handle_message(
             message,
@@ -183,12 +158,99 @@ async fn handle_client(
                 &response,
             )?;
 
-        stream
-            .write_all(&response_frame)
-            .await?;
+        if let Err(error) =
+            stream.write_all(&response_frame).await
+        {
+            cleanup_connection(&db, &mut state).await;
+            return Err(error.into());
+        }
 
-        stream.flush().await?;
+        if let Err(error) =
+            stream.flush().await
+        {
+            cleanup_connection(&db, &mut state).await;
+            return Err(error.into());
+        }
     }
+}
+
+async fn cleanup_connection(
+    db: &SqlitePool,
+    state: &mut ConnectionState,
+) {
+    let Some(user_id) = state.user_id.as_ref()
+    else {
+        return;
+    };
+
+    let Some(session_id) = state.session_id.as_ref()
+    else {
+        return;
+    };
+
+    println!(
+        "Cleaning up disconnected player: user_id={user_id}, session_id={session_id}"
+    );
+
+    let delete_result = sqlx::query(
+        r#"
+        DELETE FROM lobby_players
+        WHERE lobby_id = ?
+        AND user_id = ?
+        "#,
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .execute(db)
+    .await;
+
+    if let Err(error) = delete_result {
+        eprintln!(
+            "Failed to cleanup disconnected player: {error}"
+        );
+
+        return;
+    }
+
+    let remaining_players: i64 =
+        sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM lobby_players
+            WHERE lobby_id = ?
+            "#,
+        )
+        .bind(session_id)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
+
+    if remaining_players == 0 {
+        let delete_lobby_result =
+            sqlx::query(
+                r#"
+                DELETE FROM lobbies
+                WHERE lobby_id = ?
+                "#,
+            )
+            .bind(session_id)
+            .execute(db)
+            .await;
+
+        if let Err(error) =
+            delete_lobby_result
+        {
+            eprintln!(
+                "Failed to delete empty lobby: {error}"
+            );
+        } else {
+            println!(
+                "Deleted empty lobby: {session_id}"
+            );
+        }
+    }
+
+    state.session_id = None;
 }
 
 async fn handle_message(
@@ -201,7 +263,8 @@ async fn handle_message(
             player_id,
             player_name,
         } => {
-            let token = Uuid::new_v4().to_string();
+            let token =
+                Uuid::new_v4().to_string();
 
             let result = sqlx::query(
                 r#"
@@ -220,7 +283,6 @@ async fn handle_message(
             )
             .bind(&player_id)
             .bind(&player_name)
-            .bind(&token)
             .execute(db)
             .await;
 
@@ -233,10 +295,11 @@ async fn handle_message(
                         Some(player_name.clone());
 
                     ServerMessage::Authenticated {
-                        player: super::types::Player {
-                            id: player_id,
-                            name: player_name,
-                        },
+                        player:
+                            super::types::Player {
+                                id: player_id,
+                                name: player_name,
+                            },
                     }
                 }
 
@@ -290,7 +353,10 @@ async fn handle_message(
                 Uuid::new_v4().to_string();
 
             let lobby_name =
-                format!("KLAY Lobby {}", &session_id[..8]);
+                format!(
+                    "KLAY Lobby {}",
+                    &session_id[..8]
+                );
 
             let max_players = 8i32;
 
@@ -362,7 +428,12 @@ async fn handle_message(
             state.session_id =
                 Some(session_id.clone());
 
-            match load_session(db, &session_id).await {
+            match load_session(
+                db,
+                &session_id,
+            )
+            .await
+            {
                 Ok(session) => {
                     ServerMessage::SessionCreated {
                         session,
@@ -456,12 +527,14 @@ async fn handle_message(
                     > 0;
 
             if !already_joined
-                && players >= max_players as i64
+                && players
+                    >= max_players as i64
             {
                 return ServerMessage::Error {
                     code: 1007,
                     message:
-                        "session_full".to_string(),
+                        "session_full"
+                            .to_string(),
                 };
             }
 
@@ -497,7 +570,12 @@ async fn handle_message(
             state.session_id =
                 Some(session_id.clone());
 
-            match load_session(db, &session_id).await {
+            match load_session(
+                db,
+                &session_id,
+            )
+            .await
+            {
                 Ok(session) => {
                     ServerMessage::SessionJoined {
                         session,
@@ -547,10 +625,40 @@ async fn handle_message(
 
             match result {
                 Ok(_) => {
-                    if state.session_id.as_deref()
+                    if state
+                        .session_id
+                        .as_deref()
                         == Some(&session_id)
                     {
-                        state.session_id = None;
+                        state.session_id =
+                            None;
+                    }
+
+                    let remaining_players:
+                        i64 =
+                        sqlx::query_scalar(
+                            r#"
+                            SELECT COUNT(*)
+                            FROM lobby_players
+                            WHERE lobby_id = ?
+                            "#,
+                        )
+                        .bind(&session_id)
+                        .fetch_one(db)
+                        .await
+                        .unwrap_or(0);
+
+                    if remaining_players == 0 {
+                        let _ =
+                            sqlx::query(
+                                r#"
+                                DELETE FROM lobbies
+                                WHERE lobby_id = ?
+                                "#,
+                            )
+                            .bind(&session_id)
+                            .execute(db)
+                            .await;
                     }
 
                     ServerMessage::SessionLeft {
@@ -595,7 +703,9 @@ async fn load_session(
         .await?;
 
     if exists.is_none() {
-        return Err(sqlx::Error::RowNotFound);
+        return Err(
+            sqlx::Error::RowNotFound
+        );
     }
 
     let rows =
