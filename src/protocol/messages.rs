@@ -20,6 +20,12 @@ pub enum ClientMessage {
         session_id: String,
     },
 
+    SetReady {
+        ready: bool,
+    },
+
+    StartSession,
+
     Heartbeat,
 }
 
@@ -39,6 +45,15 @@ pub enum ServerMessage {
     },
 
     SessionLeft {
+        session_id: String,
+    },
+
+    ReadyChanged {
+        player_id: String,
+        ready: bool,
+    },
+
+    SessionStarted {
         session_id: String,
     },
 
