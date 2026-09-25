@@ -204,10 +204,8 @@ async fn main() {
         .route("/", get(home_handler))
         .route("/health", get(health_handler))
 
-        // Protocol
         .route("/api/v1/protocol", post(protocol_handler))
 
-        // Authentication
         .route("/api/v1/login", post(login_handler))
         .route("/api/v1/auth/psn", post(login_handler))
         .route(
@@ -219,10 +217,8 @@ async fn main() {
             post(validate_session_handler),
         )
 
-        // Profile
         .route("/api/v1/profiles/me", get(profile_handler))
 
-        // Database
         .route(
             "/api/v1/database/status",
             get(db_check_handler),
@@ -232,13 +228,11 @@ async fn main() {
             get(db_check_handler),
         )
 
-        // Server
         .route(
             "/api/v1/server/info",
             get(server_info_handler),
         )
 
-        // Lobbies
         .route("/api/v1/lobbies", get(list_lobbies_handler))
         .route(
             "/api/v1/lobbies/create",
