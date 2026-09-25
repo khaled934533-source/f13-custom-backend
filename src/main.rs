@@ -241,13 +241,11 @@ async fn main() {
         .route("/", get(home_handler))
         .route("/health", get(health_handler))
 
-        // Protocol
         .route(
             "/api/v1/protocol",
             post(protocol_handler),
         )
 
-        // Authentication
         .route(
             "/api/v1/login",
             post(login_handler),
@@ -257,7 +255,6 @@ async fn main() {
             post(login_handler),
         )
 
-        // Session
         .route(
             "/api/v1/session/heartbeat",
             post(heartbeat_handler),
@@ -267,13 +264,11 @@ async fn main() {
             post(validate_session_handler),
         )
 
-        // Profile
         .route(
             "/api/v1/profiles/me",
             get(profile_handler),
         )
 
-        // Database
         .route(
             "/api/v1/database/status",
             get(db_check_handler),
@@ -283,13 +278,11 @@ async fn main() {
             get(db_check_handler),
         )
 
-        // Server
         .route(
             "/api/v1/server/info",
             get(server_info_handler),
         )
 
-        // Lobbies
         .route(
             "/api/v1/lobbies",
             get(list_lobbies_handler),
@@ -380,6 +373,7 @@ async fn protocol_handler(
                 player: protocol::types::Player {
                     id: player_id,
                     name: player_name,
+                    ready: false,
                 },
             }
         }
@@ -390,6 +384,7 @@ async fn protocol_handler(
                     protocol::types::Session {
                         id: Uuid::new_v4().to_string(),
                         players: Vec::new(),
+                        started: false,
                     },
             }
         }
@@ -402,6 +397,7 @@ async fn protocol_handler(
                     protocol::types::Session {
                         id: session_id,
                         players: Vec::new(),
+                        started: false,
                     },
             }
         }
@@ -411,6 +407,19 @@ async fn protocol_handler(
         } => {
             ServerMessage::SessionLeft {
                 session_id,
+            }
+        }
+
+        ClientMessage::SetReady { ready } => {
+            ServerMessage::ReadyChanged {
+                player_id: "http-client".to_string(),
+                ready,
+            }
+        }
+
+        ClientMessage::StartSession => {
+            ServerMessage::SessionStarted {
+                session_id: "http-session".to_string(),
             }
         }
 
@@ -870,7 +879,8 @@ async fn get_lobby_handler(
                 json!({
                     "userId": user_id,
                     "displayName": display_name,
-                    "joinedAt": joined_at
+                    "joinedAt": joined_at,
+                    "ready": false
                 })
             },
         )
@@ -954,10 +964,6 @@ async fn join_lobby_handler(
         }));
     };
 
-    // ---------------------------------------------------------
-    // Check whether the player is already inside.
-    // ---------------------------------------------------------
-
     let already_joined: bool =
         sqlx::query_scalar::<_, i64>(
             r#"
@@ -1004,10 +1010,6 @@ async fn join_lobby_handler(
         }));
     }
 
-    // ---------------------------------------------------------
-    // Check capacity.
-    // ---------------------------------------------------------
-
     let players: i64 =
         sqlx::query_scalar(
             r#"
@@ -1029,10 +1031,6 @@ async fn join_lobby_handler(
             "maxPlayers": max_players
         }));
     }
-
-    // ---------------------------------------------------------
-    // Add player.
-    // ---------------------------------------------------------
 
     let result = sqlx::query(
         r#"
@@ -1146,6 +1144,15 @@ async fn leave_lobby_handler(
                 .await
                 .unwrap_or(0);
 
+            if remaining == 0 {
+                let _ = sqlx::query(
+                    "DELETE FROM lobbies WHERE lobby_id = ?",
+                )
+                .bind(&lobby_id)
+                .execute(&state.db)
+                .await;
+            }
+
             Json(json!({
                 "success": true,
                 "removed": result.rows_affected() > 0,
@@ -1217,7 +1224,9 @@ async fn server_info_handler(
             "lobby_join",
             "lobby_leave",
             "protocol",
-            "custom_tcp_protocol"
+            "custom_tcp_protocol",
+            "ready_state",
+            "session_start"
         ]
     }))
 }
