@@ -13,14 +13,6 @@ pub fn encode_frame<T: Serialize>(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let payload = serde_json::to_vec(payload)?;
 
-    let payload_len = u32::try_from(payload.len())
-        .map_err(|_| {
-            io::Error::new(
-                ErrorKind::InvalidData,
-                "payload too large",
-            )
-        })?;
-
     if payload.len() > MAX_PAYLOAD_SIZE {
         return Err(
             io::Error::new(
@@ -30,6 +22,14 @@ pub fn encode_frame<T: Serialize>(
             .into(),
         );
     }
+
+    let payload_len = u32::try_from(payload.len())
+        .map_err(|_| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "payload too large",
+            )
+        })?;
 
     let mut frame =
         Vec::with_capacity(HEADER_SIZE + payload.len());
@@ -106,8 +106,7 @@ pub fn decode_frame<T: DeserializeOwned>(
         );
     }
 
-    let expected_len =
-        HEADER_SIZE + payload_len;
+    let expected_len = HEADER_SIZE + payload_len;
 
     if data.len() < expected_len {
         return Err(
@@ -134,9 +133,5 @@ pub fn decode_frame<T: DeserializeOwned>(
             &data[HEADER_SIZE..expected_len],
         )?;
 
-    Ok((
-        message_id,
-        request_id,
-        payload,
-    ))
+    Ok((message_id, request_id, payload))
 }
