@@ -475,6 +475,9 @@ async fn handle_message(
                 };
             }
 
+            let token =
+                uuid::Uuid::new_v4().to_string();
+
             let result = sqlx::query(
                 r#"
                 INSERT INTO sessions (
@@ -495,7 +498,7 @@ async fn handle_message(
             )
             .bind(&player_id)
             .bind(&player_name)
-            .bind("klay-session")
+            .bind(&token)
             .execute(db)
             .await;
 
@@ -509,6 +512,13 @@ async fn handle_message(
 
                     state.ready = false;
                     state.started = false;
+
+                    println!(
+                        "TCP player authenticated: user_id={}, name={}, token={}",
+                        player_id,
+                        player_name,
+                        token
+                    );
 
                     ServerMessage::Authenticated {
                         player: Player {
