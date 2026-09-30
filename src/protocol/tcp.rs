@@ -130,6 +130,21 @@ async fn handle_client(
 
         frame.extend_from_slice(&payload);
 
+        let raw_payload =
+            String::from_utf8_lossy(&payload);
+
+        println!(
+            "TCP packet received: message_id={}, request_id={}, payload={}",
+            u16::from_be_bytes([header[5], header[6]]),
+            u32::from_be_bytes([
+                header[7],
+                header[8],
+                header[9],
+                header[10],
+            ]),
+            raw_payload
+        );
+
         let decoded =
             decode_frame::<ClientMessage>(&frame);
 
