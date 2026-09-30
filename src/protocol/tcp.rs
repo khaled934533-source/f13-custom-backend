@@ -385,68 +385,19 @@ fn client_message_id(
 }
 
 async fn cleanup_connection(
-    db: &SqlitePool,
+    _db: &SqlitePool,
     state: &mut ConnectionState,
 ) {
-    let Some(user_id) =
-        state.user_id.as_ref()
-    else {
-        return;
-    };
-
-    let Some(session_id) =
-        state.session_id.as_ref()
-    else {
-        return;
-    };
-
-    println!(
-        "Cleaning up disconnected player: user_id={user_id}, session_id={session_id}"
-    );
-
-    let result = sqlx::query(
-        r#"
-        DELETE FROM lobby_players
-        WHERE lobby_id = ?
-        AND user_id = ?
-        "#,
-    )
-    .bind(session_id)
-    .bind(user_id)
-    .execute(db)
-    .await;
-
-    if let Err(error) = result {
-        eprintln!(
-            "Failed to cleanup disconnected player: {error}"
+    if let (
+        Some(user_id),
+        Some(session_id),
+    ) = (
+        state.user_id.as_ref(),
+        state.session_id.as_ref(),
+    ) {
+        println!(
+            "TCP connection closed; preserving lobby membership: user_id={user_id}, session_id={session_id}"
         );
-
-        return;
-    }
-
-    let remaining: i64 =
-        sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*)
-            FROM lobby_players
-            WHERE lobby_id = ?
-            "#,
-        )
-        .bind(session_id)
-        .fetch_one(db)
-        .await
-        .unwrap_or(0);
-
-    if remaining == 0 {
-        let _ = sqlx::query(
-            r#"
-            DELETE FROM lobbies
-            WHERE lobby_id = ?
-            "#,
-        )
-        .bind(session_id)
-        .execute(db)
-        .await;
     }
 
     state.session_id = None;
@@ -955,7 +906,11 @@ async fn handle_message(
                 AND user_id = ?
                 "#,
             )
-            .bind(if ready { 1i64 } else { 0i64 })
+            .bind(if ready {
+                1i64
+            } else {
+                0i64
+            })
             .bind(&session_id)
             .bind(&user_id)
             .execute(db)
@@ -1070,6 +1025,29 @@ async fn handle_message(
                     code: 1013,
                     message:
                         "session_empty"
+                            .to_string(),
+                };
+            }
+
+            let not_ready_players: i64 =
+                sqlx::query_scalar(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM lobby_players
+                    WHERE lobby_id = ?
+                    AND ready = 0
+                    "#,
+                )
+                .bind(&session_id)
+                .fetch_one(db)
+                .await
+                .unwrap_or(0);
+
+            if not_ready_players > 0 {
+                return ServerMessage::Error {
+                    code: 1018,
+                    message:
+                        "players_not_ready"
                             .to_string(),
                 };
             }
