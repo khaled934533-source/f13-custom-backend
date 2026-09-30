@@ -629,9 +629,10 @@ async fn handle_message(
                 r#"
                 INSERT INTO lobby_players (
                     lobby_id,
-                    user_id
+                    user_id,
+                    ready
                 )
-                VALUES (?, ?)
+                VALUES (?, ?, 0)
                 "#,
             )
             .bind(&session_id)
@@ -668,7 +669,6 @@ async fn handle_message(
             match load_session(
                 db,
                 &session_id,
-                false,
             )
             .await
             {
@@ -739,15 +739,6 @@ async fn handle_message(
                 .await
                 .unwrap_or(0);
 
-            if count >= max_players as i64 {
-                return ServerMessage::Error {
-                    code: 1007,
-                    message:
-                        "session_full"
-                            .to_string(),
-                };
-            }
-
             let already_joined: i64 =
                 sqlx::query_scalar(
                     r#"
@@ -763,14 +754,26 @@ async fn handle_message(
                 .await
                 .unwrap_or(0);
 
+            if already_joined == 0
+                && count >= max_players as i64
+            {
+                return ServerMessage::Error {
+                    code: 1007,
+                    message:
+                        "session_full"
+                            .to_string(),
+                };
+            }
+
             if already_joined == 0 {
                 let result = sqlx::query(
                     r#"
                     INSERT INTO lobby_players (
                         lobby_id,
-                        user_id
+                        user_id,
+                        ready
                     )
-                    VALUES (?, ?)
+                    VALUES (?, ?, 0)
                     "#,
                 )
                 .bind(&session_id)
@@ -792,16 +795,32 @@ async fn handle_message(
                 }
             }
 
+            let existing_ready: Option<i64> =
+                sqlx::query_scalar(
+                    r#"
+                    SELECT ready
+                    FROM lobby_players
+                    WHERE lobby_id = ?
+                    AND user_id = ?
+                    "#,
+                )
+                .bind(&session_id)
+                .bind(&user_id)
+                .fetch_optional(db)
+                .await
+                .unwrap_or(None);
+
             state.session_id =
                 Some(session_id.clone());
 
-            state.ready = false;
+            state.ready =
+                existing_ready.unwrap_or(0) != 0;
+
             state.started = false;
 
             match load_session(
                 db,
                 &session_id,
-                false,
             )
             .await
             {
@@ -908,14 +927,16 @@ async fn handle_message(
                 };
             };
 
-            if state.session_id.is_none() {
+            let Some(session_id) =
+                state.session_id.clone()
+            else {
                 return ServerMessage::Error {
                     code: 1010,
                     message:
                         "session_required"
                             .to_string(),
                 };
-            }
+            };
 
             if state.started {
                 return ServerMessage::Error {
@@ -926,11 +947,53 @@ async fn handle_message(
                 };
             }
 
-            state.ready = ready;
+            let result = sqlx::query(
+                r#"
+                UPDATE lobby_players
+                SET ready = ?
+                WHERE lobby_id = ?
+                AND user_id = ?
+                "#,
+            )
+            .bind(if ready { 1i64 } else { 0i64 })
+            .bind(&session_id)
+            .bind(&user_id)
+            .execute(db)
+            .await;
 
-            ServerMessage::ReadyChanged {
-                player_id: user_id,
-                ready,
+            match result {
+                Ok(result)
+                    if result.rows_affected() > 0 =>
+                {
+                    state.ready = ready;
+
+                    ServerMessage::ReadyChanged {
+                        player_id: user_id,
+                        ready,
+                    }
+                }
+
+                Ok(_) => {
+                    ServerMessage::Error {
+                        code: 1016,
+                        message:
+                            "player_not_in_session"
+                                .to_string(),
+                    }
+                }
+
+                Err(error) => {
+                    eprintln!(
+                        "Failed to update ready state: {error}"
+                    );
+
+                    ServerMessage::Error {
+                        code: 1017,
+                        message:
+                            "ready_update_failed"
+                                .to_string(),
+                    }
+                }
             }
         }
 
@@ -1023,7 +1086,6 @@ async fn handle_message(
 async fn load_session(
     db: &SqlitePool,
     session_id: &str,
-    started: bool,
 ) -> Result<Session, sqlx::Error> {
     let exists: Option<(String,)> =
         sqlx::query_as(
@@ -1044,11 +1106,12 @@ async fn load_session(
     }
 
     let rows =
-        sqlx::query_as::<_, (String, String)>(
+        sqlx::query_as::<_, (String, String, i64)>(
             r#"
             SELECT
                 s.user_id,
-                s.display_name
+                s.display_name,
+                lp.ready
             FROM lobby_players lp
             INNER JOIN sessions s
                 ON s.user_id = lp.user_id
@@ -1062,16 +1125,16 @@ async fn load_session(
 
     let players = rows
         .into_iter()
-        .map(|(id, name)| Player {
+        .map(|(id, name, ready)| Player {
             id,
             name,
-            ready: false,
+            ready: ready != 0,
         })
         .collect();
 
     Ok(Session {
         id: session_id.to_string(),
         players,
-        started,
+        started: false,
     })
 }
