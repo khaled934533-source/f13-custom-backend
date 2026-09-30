@@ -75,21 +75,106 @@ async fn handle_client(
     loop {
         let mut header = [0u8; HEADER_SIZE];
 
+        println!("TCP waiting for packet header...");
+
         match stream.read_exact(&mut header).await {
-            Ok(_) => {}
+            Ok(_) => {
+                println!(
+                    "TCP header received: {:?}",
+                    header
+                );
+            }
 
             Err(error)
                 if error.kind()
                     == io::ErrorKind::UnexpectedEof =>
             {
-                cleanup_connection(&db, &mut state).await;
+                println!(
+                    "TCP connection closed before full header was received."
+                );
+
+                cleanup_connection(
+                    &db,
+                    &mut state,
+                )
+                .await;
+
                 return Ok(());
             }
 
             Err(error) => {
-                cleanup_connection(&db, &mut state).await;
+                eprintln!(
+                    "TCP header read error: {error}"
+                );
+
+                cleanup_connection(
+                    &db,
+                    &mut state,
+                )
+                .await;
+
                 return Err(error.into());
             }
+        }
+
+        if &header[0..4] != b"KLAY" {
+            eprintln!(
+                "TCP invalid magic: {:?}",
+                &header[0..4]
+            );
+
+            let response =
+                ServerMessage::Error {
+                    code: 1100,
+                    message:
+                        "invalid_magic"
+                            .to_string(),
+                };
+
+            let response_frame =
+                encode_frame(
+                    0x8000,
+                    0,
+                    &response,
+                )?;
+
+            stream
+                .write_all(&response_frame)
+                .await?;
+
+            stream.flush().await?;
+
+            continue;
+        }
+
+        if header[4] != 1 {
+            eprintln!(
+                "TCP unsupported protocol version: {}",
+                header[4]
+            );
+
+            let response =
+                ServerMessage::Error {
+                    code: 1101,
+                    message:
+                        "unsupported_protocol_version"
+                            .to_string(),
+                };
+
+            let response_frame =
+                encode_frame(
+                    0x8000,
+                    0,
+                    &response,
+                )?;
+
+            stream
+                .write_all(&response_frame)
+                .await?;
+
+            stream.flush().await?;
+
+            continue;
         }
 
         let payload_len = u32::from_be_bytes([
@@ -100,7 +185,11 @@ async fn handle_client(
         ]) as usize;
 
         if payload_len > MAX_PAYLOAD_SIZE {
-            cleanup_connection(&db, &mut state).await;
+            cleanup_connection(
+                &db,
+                &mut state,
+            )
+            .await;
 
             return Err(
                 io::Error::new(
@@ -124,7 +213,16 @@ async fn handle_client(
         if let Err(error) =
             stream.read_exact(&mut payload).await
         {
-            cleanup_connection(&db, &mut state).await;
+            eprintln!(
+                "TCP payload read error: {error}"
+            );
+
+            cleanup_connection(
+                &db,
+                &mut state,
+            )
+            .await;
+
             return Err(error.into());
         }
 
@@ -135,7 +233,10 @@ async fn handle_client(
 
         println!(
             "TCP packet received: message_id={}, request_id={}, payload={}",
-            u16::from_be_bytes([header[5], header[6]]),
+            u16::from_be_bytes([
+                header[5],
+                header[6],
+            ]),
             u32::from_be_bytes([
                 header[7],
                 header[8],
@@ -153,6 +254,10 @@ async fn handle_client(
                 Ok(value) => value,
 
                 Err(error) => {
+                    eprintln!(
+                        "TCP frame decode error: {error}"
+                    );
+
                     cleanup_connection(
                         &db,
                         &mut state,
@@ -208,19 +313,47 @@ async fn handle_client(
                 &response,
             )?;
 
+        println!(
+            "TCP sending response: message_id={}, request_id={}",
+            response_message_id,
+            request_id
+        );
+
         if let Err(error) =
             stream.write_all(&response_frame).await
         {
-            cleanup_connection(&db, &mut state).await;
+            eprintln!(
+                "TCP response write error: {error}"
+            );
+
+            cleanup_connection(
+                &db,
+                &mut state,
+            )
+            .await;
+
             return Err(error.into());
         }
 
         if let Err(error) =
             stream.flush().await
         {
-            cleanup_connection(&db, &mut state).await;
+            eprintln!(
+                "TCP response flush error: {error}"
+            );
+
+            cleanup_connection(
+                &db,
+                &mut state,
+            )
+            .await;
+
             return Err(error.into());
         }
+
+        println!(
+            "TCP response sent successfully."
+        );
     }
 }
 
