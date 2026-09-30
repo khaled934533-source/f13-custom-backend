@@ -127,10 +127,6 @@ async fn main() {
             "Failed to connect to SQLite database",
         );
 
-    // =========================================================
-    // DATABASE
-    // =========================================================
-
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS sessions (
@@ -167,15 +163,44 @@ async fn main() {
             lobby_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            ready INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (lobby_id, user_id)
         )
         "#,
     )
     .execute(&db)
     .await
-    .expect(
-        "Failed to create lobby_players table",
-    );
+    .expect("Failed to create lobby_players table");
+
+    let ready_column: Option<String> =
+        sqlx::query_scalar(
+            r#"
+            SELECT name
+            FROM pragma_table_info('lobby_players')
+            WHERE name = 'ready'
+            "#,
+        )
+        .fetch_optional(&db)
+        .await
+        .expect(
+            "Failed to inspect lobby_players table",
+        );
+
+    if ready_column.is_none() {
+        sqlx::query(
+            r#"
+            ALTER TABLE lobby_players
+            ADD COLUMN ready INTEGER NOT NULL DEFAULT 0
+            "#,
+        )
+        .execute(&db)
+        .await
+        .expect(
+            "Failed to add ready column to lobby_players",
+        );
+
+        println!("Lobby players ready column added");
+    }
 
     println!("Database connected");
     println!("Sessions table ready");
@@ -186,10 +211,6 @@ async fn main() {
         db: db.clone(),
         public_url: public_url.clone(),
     };
-
-    // =========================================================
-    // CUSTOM TCP PROTOCOL
-    // =========================================================
 
     let tcp_host = env::var("TCP_HOST")
         .unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -216,10 +237,6 @@ async fn main() {
         }
     });
 
-    // =========================================================
-    // CORS
-    // =========================================================
-
     let cors = CorsLayer::new()
         .allow_origin(
             public_url
@@ -233,19 +250,13 @@ async fn main() {
             tower_http::cors::Any,
         );
 
-    // =========================================================
-    // ROUTES
-    // =========================================================
-
     let app = Router::new()
         .route("/", get(home_handler))
         .route("/health", get(health_handler))
-
         .route(
             "/api/v1/protocol",
             post(protocol_handler),
         )
-
         .route(
             "/api/v1/login",
             post(login_handler),
@@ -254,7 +265,6 @@ async fn main() {
             "/api/v1/auth/psn",
             post(login_handler),
         )
-
         .route(
             "/api/v1/session/heartbeat",
             post(heartbeat_handler),
@@ -263,12 +273,10 @@ async fn main() {
             "/api/v1/session/validate",
             post(validate_session_handler),
         )
-
         .route(
             "/api/v1/profiles/me",
             get(profile_handler),
         )
-
         .route(
             "/api/v1/database/status",
             get(db_check_handler),
@@ -277,12 +285,10 @@ async fn main() {
             "/api/v1/database_check",
             get(db_check_handler),
         )
-
         .route(
             "/api/v1/server/info",
             get(server_info_handler),
         )
-
         .route(
             "/api/v1/lobbies",
             get(list_lobbies_handler),
@@ -303,7 +309,6 @@ async fn main() {
             "/api/v1/lobbies/:lobby_id/leave",
             post(leave_lobby_handler),
         )
-
         .with_state(state)
         .layer(cors);
 
@@ -324,17 +329,9 @@ async fn main() {
         .expect("Server failed");
 }
 
-// =========================================================
-// HOME
-// =========================================================
-
 async fn home_handler() -> &'static str {
     "KLAY Friday the 13th Private Server v0.4.0"
 }
-
-// =========================================================
-// HEALTH
-// =========================================================
 
 async fn health_handler(
     State(state): State<AppState>,
@@ -356,10 +353,6 @@ async fn health_handler(
         "public_url": state.public_url
     }))
 }
-
-// =========================================================
-// PROTOCOL - HTTP TEST API
-// =========================================================
 
 async fn protocol_handler(
     Json(packet): Json<Packet<ClientMessage>>,
@@ -436,10 +429,6 @@ async fn protocol_handler(
     })
 }
 
-// =========================================================
-// LOGIN
-// =========================================================
-
 async fn login_handler(
     State(state): State<AppState>,
     Json(request): Json<LoginRequest>,
@@ -498,10 +487,6 @@ async fn login_handler(
     }))
 }
 
-// =========================================================
-// HEARTBEAT
-// =========================================================
-
 async fn heartbeat_handler(
     State(state): State<AppState>,
     Json(request): Json<AuthRequest>,
@@ -533,10 +518,6 @@ async fn heartbeat_handler(
         })),
     }
 }
-
-// =========================================================
-// SESSION VALIDATION
-// =========================================================
 
 async fn validate_session_handler(
     State(state): State<AppState>,
@@ -570,10 +551,6 @@ async fn validate_session_handler(
         })),
     }
 }
-
-// =========================================================
-// PROFILE
-// =========================================================
 
 async fn profile_handler(
     State(state): State<AppState>,
@@ -620,10 +597,6 @@ async fn profile_handler(
         }
     }))
 }
-
-// =========================================================
-// CREATE LOBBY
-// =========================================================
 
 async fn create_lobby_handler(
     State(state): State<AppState>,
@@ -697,9 +670,10 @@ async fn create_lobby_handler(
         r#"
         INSERT INTO lobby_players (
             lobby_id,
-            user_id
+            user_id,
+            ready
         )
-        VALUES (?, ?)
+        VALUES (?, ?, 0)
         "#,
     )
     .bind(&lobby_id)
@@ -741,10 +715,6 @@ async fn create_lobby_handler(
         "status": "waiting"
     }))
 }
-
-// =========================================================
-// LIST LOBBIES
-// =========================================================
 
 async fn list_lobbies_handler(
     State(state): State<AppState>,
@@ -810,10 +780,6 @@ async fn list_lobbies_handler(
     }))
 }
 
-// =========================================================
-// GET SINGLE LOBBY
-// =========================================================
-
 async fn get_lobby_handler(
     State(state): State<AppState>,
     Path(lobby_id): Path<String>,
@@ -853,13 +819,14 @@ async fn get_lobby_handler(
     let players =
         sqlx::query_as::<
             _,
-            (String, String, String),
+            (String, String, String, i64),
         >(
             r#"
             SELECT
                 s.user_id,
                 s.display_name,
-                lp.joined_at
+                lp.joined_at,
+                lp.ready
             FROM lobby_players lp
             INNER JOIN sessions s
                 ON s.user_id = lp.user_id
@@ -875,12 +842,12 @@ async fn get_lobby_handler(
     let player_list: Vec<Value> = players
         .iter()
         .map(
-            |(user_id, display_name, joined_at)| {
+            |(user_id, display_name, joined_at, ready)| {
                 json!({
                     "userId": user_id,
                     "displayName": display_name,
                     "joinedAt": joined_at,
-                    "ready": false
+                    "ready": *ready != 0
                 })
             },
         )
@@ -906,10 +873,6 @@ async fn get_lobby_handler(
         }
     }))
 }
-
-// =========================================================
-// JOIN LOBBY
-// =========================================================
 
 async fn join_lobby_handler(
     State(state): State<AppState>,
@@ -1036,9 +999,10 @@ async fn join_lobby_handler(
         r#"
         INSERT INTO lobby_players (
             lobby_id,
-            user_id
+            user_id,
+            ready
         )
-        VALUES (?, ?)
+        VALUES (?, ?, 0)
         "#,
     )
     .bind(&lobby_id)
@@ -1091,10 +1055,6 @@ async fn join_lobby_handler(
         }
     }))
 }
-
-// =========================================================
-// LEAVE LOBBY
-// =========================================================
 
 async fn leave_lobby_handler(
     State(state): State<AppState>,
@@ -1174,10 +1134,6 @@ async fn leave_lobby_handler(
     }
 }
 
-// =========================================================
-// DATABASE CHECK
-// =========================================================
-
 async fn db_check_handler(
     State(state): State<AppState>,
 ) -> Json<Value> {
@@ -1200,10 +1156,6 @@ async fn db_check_handler(
         "healthy": connected
     }))
 }
-
-// =========================================================
-// SERVER INFO
-// =========================================================
 
 async fn server_info_handler(
     State(state): State<AppState>,
