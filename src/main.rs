@@ -23,7 +23,7 @@ use protocol::ClientMessage;
 use protocol::Packet;
 use protocol::ServerMessage;
 
-const SERVER_VERSION: &str = "0.4.0";
+const SERVER_VERSION: &str = "0.5.0";
 const DEFAULT_MAX_PLAYERS: i32 = 8;
 
 #[derive(Clone)]
@@ -60,6 +60,13 @@ struct OfflineMatchRequest {
     match_id: String,
     mode: String,
     completed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OfflineStartRequest {
+    token: String,
+    match_id: String,
+    mode: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -216,6 +223,21 @@ async fn main() {
     .await
     .expect("Failed to create klay_achievements table");
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS offline_match_starts (
+            user_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            mode TEXT NOT NULL CHECK (mode IN ('counselor', 'jason')),
+            started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, match_id)
+        )
+        "#,
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to create offline_match_starts table");
+
     println!("Database connected");
     println!("Sessions table ready");
     println!("Lobbies table ready");
@@ -260,6 +282,10 @@ async fn main() {
         .route("/api/v1/session/validate", post(validate_session_handler))
         .route("/api/v1/profiles/me", get(profile_handler))
         .route(
+            "/api/v1/trophies/offline-start",
+            post(record_offline_start_handler),
+        )
+        .route(
             "/api/v1/trophies/offline-match",
             post(record_offline_match_handler),
         )
@@ -289,7 +315,7 @@ async fn main() {
 }
 
 async fn home_handler() -> &'static str {
-    "KLAY Friday the 13th Private Server v0.4.0"
+    "KLAY Friday the 13th Private Server v0.5.0"
 }
 
 async fn health_handler(State(state): State<AppState>) -> Json<Value> {
@@ -518,6 +544,132 @@ async fn profile_handler(
         "note": "Custom catalog only. Official game and platform entitlements are unchanged."
     }))
 }
+async fn record_offline_start_handler(
+    State(state): State<AppState>,
+    Json(request): Json<OfflineStartRequest>,
+) -> Json<Value> {
+    let token = request.token.trim();
+    let match_id = request.match_id.trim();
+
+    if token.is_empty() || match_id.is_empty() {
+        return Json(json!({
+            "success": false,
+            "error": "missing_token_or_match_id"
+        }));
+    }
+
+    if match_id.len() > 128 {
+        return Json(json!({
+            "success": false,
+            "error": "match_id_too_long"
+        }));
+    }
+
+    if request.mode != "counselor" && request.mode != "jason" {
+        return Json(json!({
+            "success": false,
+            "error": "invalid_mode",
+            "allowed_modes": ["counselor", "jason"]
+        }));
+    }
+
+    let user_id: Option<String> =
+        match sqlx::query_scalar("SELECT user_id FROM sessions WHERE token = ?")
+            .bind(token)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("Session lookup failed: {error}");
+                return Json(json!({
+                    "success": false,
+                    "error": "database_error"
+                }));
+            }
+        };
+
+    let Some(user_id) = user_id else {
+        return Json(json!({
+            "success": false,
+            "error": "invalid_session"
+        }));
+    };
+
+    let inserted = match sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO offline_match_starts
+            (user_id, match_id, mode)
+        VALUES (?, ?, ?)
+        "#,
+    )
+    .bind(&user_id)
+    .bind(match_id)
+    .bind(&request.mode)
+    .execute(&state.db)
+    .await
+    {
+        Ok(result) => result.rows_affected() > 0,
+        Err(error) => {
+            eprintln!("Failed to record match start: {error}");
+            return Json(json!({
+                "success": false,
+                "error": "database_error"
+            }));
+        }
+    };
+
+    let unlock_result = sqlx::query(
+        r#"
+        WITH RECURSIVE seq(x) AS (
+            SELECT 1
+            UNION ALL
+            SELECT x + 1 FROM seq WHERE x < 999
+        )
+        INSERT OR IGNORE INTO klay_achievements
+            (user_id, achievement_id)
+        SELECT ?, 'offline_trophy_' || printf('%03d', x)
+        FROM seq
+        "#,
+    )
+    .bind(&user_id)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = unlock_result {
+        eprintln!("Failed to save achievements: {error}");
+        return Json(json!({
+            "success": false,
+            "error": "achievement_save_failed"
+        }));
+    }
+
+    let unlocked: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM klay_achievements
+        WHERE user_id = ?
+          AND achievement_id LIKE 'offline_trophy_%'
+        "#,
+    )
+    .bind(&user_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    Json(json!({
+        "success": true,
+        "event": "offline_match_started",
+        "recorded": inserted,
+        "duplicate": !inserted,
+        "match_id": match_id,
+        "mode": request.mode,
+        "custom_achievements_unlocked": unlocked,
+        "custom_achievements_total": 999,
+        "note": "Custom KLAY backend records only, not official PSN trophies"
+    }))
+}
+
 async fn record_offline_match_handler(
     State(state): State<AppState>,
     Json(request): Json<OfflineMatchRequest>,
