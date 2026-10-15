@@ -1,20 +1,27 @@
+use std::env;
+use std::net::SocketAddr;
 
-use axum::{
-    extract::{Path, State},
-    http::HeaderValue,
-    routing::{get, post},
-    Json, Router,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
-use std::{env, net::SocketAddr};
+use axum::Json;
+use axum::Router;
+use axum::extract::Path;
+use axum::extract::State;
+use axum::http::HeaderValue;
+use axum::routing::get;
+use axum::routing::post;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
+use sqlx::SqlitePool;
+use sqlx::sqlite::SqlitePoolOptions;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 mod protocol;
 
-use protocol::{ClientMessage, Packet, ServerMessage};
+use protocol::ClientMessage;
+use protocol::Packet;
+use protocol::ServerMessage;
 
 const SERVER_VERSION: &str = "0.4.0";
 const DEFAULT_MAX_PLAYERS: i32 = 8;
@@ -68,20 +75,15 @@ struct LoginResponse {
 
 #[tokio::main]
 async fn main() {
-    let host = env::var("HOST")
-        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
 
-    let port = env::var("PORT")
-        .unwrap_or_else(|_| "8080".to_string());
+    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
 
     let public_url = env::var("PUBLIC_URL")
-        .unwrap_or_else(|_| {
-            "https://f13-custom-backend-production.up.railway.app"
-                .to_string()
-        });
+        .unwrap_or_else(|_| "https://f13-custom-backend-production.up.railway.app".to_string());
 
-    let database_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite:///tmp/f13.db".to_string());
+    let database_url =
+        env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:///tmp/f13.db".to_string());
 
     println!("========================================");
     println!("KLAY Friday the 13th Private Server");
@@ -226,19 +228,15 @@ async fn main() {
         public_url: public_url.clone(),
     };
 
-    let tcp_host = env::var("TCP_HOST")
-        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    let tcp_host = env::var("TCP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
 
-    let tcp_port = env::var("TCP_PORT")
-        .unwrap_or_else(|_| "9000".to_string());
+    let tcp_port = env::var("TCP_PORT").unwrap_or_else(|_| "9000".to_string());
 
     let tcp_addr = format!("{tcp_host}:{tcp_port}");
     let tcp_db = db.clone();
 
     tokio::spawn(async move {
-        if let Err(error) =
-            protocol::tcp::run_tcp_server(tcp_addr, tcp_db).await
-        {
+        if let Err(error) = protocol::tcp::run_tcp_server(tcp_addr, tcp_db).await {
             eprintln!("Protocol TCP server stopped: {error}");
         }
     });
@@ -265,24 +263,15 @@ async fn main() {
             "/api/v1/trophies/offline-match",
             post(record_offline_match_handler),
         )
-        .route(
-            "/api/v1/trophies/progress",
-            post(trophy_progress_handler),
-        )
+        .route("/api/v1/trophies/progress", post(trophy_progress_handler))
         .route("/api/v1/database/status", get(db_check_handler))
         .route("/api/v1/database_check", get(db_check_handler))
         .route("/api/v1/server/info", get(server_info_handler))
         .route("/api/v1/lobbies", get(list_lobbies_handler))
         .route("/api/v1/lobbies/create", post(create_lobby_handler))
         .route("/api/v1/lobbies/:lobby_id", get(get_lobby_handler))
-        .route(
-            "/api/v1/lobbies/:lobby_id/join",
-            post(join_lobby_handler),
-        )
-        .route(
-            "/api/v1/lobbies/:lobby_id/leave",
-            post(leave_lobby_handler),
-        )
+        .route("/api/v1/lobbies/:lobby_id/join", post(join_lobby_handler))
+        .route("/api/v1/lobbies/:lobby_id/leave", post(leave_lobby_handler))
         .with_state(state)
         .layer(cors);
 
@@ -296,22 +285,15 @@ async fn main() {
         .await
         .expect("Failed to bind server");
 
-    axum::serve(listener, app)
-        .await
-        .expect("Server failed");
+    axum::serve(listener, app).await.expect("Server failed");
 }
 
 async fn home_handler() -> &'static str {
     "KLAY Friday the 13th Private Server v0.4.0"
 }
 
-async fn health_handler(
-    State(state): State<AppState>,
-) -> Json<Value> {
-    let database = sqlx::query("SELECT 1")
-        .execute(&state.db)
-        .await
-        .is_ok();
+async fn health_handler(State(state): State<AppState>) -> Json<Value> {
+    let database = sqlx::query("SELECT 1").execute(&state.db).await.is_ok();
 
     Json(json!({
         "status": "ok",
@@ -345,19 +327,15 @@ async fn protocol_handler(
             },
         },
 
-        ClientMessage::JoinSession { session_id } => {
-            ServerMessage::SessionJoined {
-                session: protocol::types::Session {
-                    id: session_id,
-                    players: Vec::new(),
-                    started: false,
-                },
-            }
-        }
+        ClientMessage::JoinSession { session_id } => ServerMessage::SessionJoined {
+            session: protocol::types::Session {
+                id: session_id,
+                players: Vec::new(),
+                started: false,
+            },
+        },
 
-        ClientMessage::LeaveSession { session_id } => {
-            ServerMessage::SessionLeft { session_id }
-        }
+        ClientMessage::LeaveSession { session_id } => ServerMessage::SessionLeft { session_id },
 
         ClientMessage::SetReady { ready } => ServerMessage::ReadyChanged {
             player_id: "http-client".to_string(),
@@ -498,7 +476,7 @@ async fn profile_handler(
     };
 
     let session = sqlx::query_as::<_, (String, String)>(
-        "SELECT user_id, display_name FROM sessions WHERE token = ?"
+        "SELECT user_id, display_name FROM sessions WHERE token = ?",
     )
     .bind(token)
     .fetch_optional(&state.db)
@@ -576,13 +554,12 @@ async fn record_offline_match_handler(
         }));
     }
 
-    let user_id: Option<String> = sqlx::query_scalar(
-        "SELECT user_id FROM sessions WHERE token = ?",
-    )
-    .bind(token)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
+    let user_id: Option<String> =
+        sqlx::query_scalar("SELECT user_id FROM sessions WHERE token = ?")
+            .bind(token)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
 
     let Some(user_id) = user_id else {
         return Json(json!({
@@ -685,13 +662,12 @@ async fn trophy_progress_handler(
         }));
     }
 
-    let user_id: Option<String> = sqlx::query_scalar(
-        "SELECT user_id FROM sessions WHERE token = ?",
-    )
-    .bind(token)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
+    let user_id: Option<String> =
+        sqlx::query_scalar("SELECT user_id FROM sessions WHERE token = ?")
+            .bind(token)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
 
     let Some(user_id) = user_id else {
         return Json(json!({
@@ -844,9 +820,7 @@ async fn create_lobby_handler(
     }))
 }
 
-async fn list_lobbies_handler(
-    State(state): State<AppState>,
-) -> Json<Value> {
+async fn list_lobbies_handler(State(state): State<AppState>) -> Json<Value> {
     let lobbies = sqlx::query_as::<_, (String, String, String, i32)>(
         r#"
         SELECT lobby_id, name, host_user_id, max_players
@@ -861,13 +835,12 @@ async fn list_lobbies_handler(
     let mut result = Vec::new();
 
     for (lobby_id, name, host_user_id, max_players) in lobbies {
-        let players: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?",
-        )
-        .bind(&lobby_id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
+        let players: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?")
+                .bind(&lobby_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or(0);
 
         result.push(json!({
             "lobbyId": lobby_id,
@@ -900,9 +873,7 @@ async fn get_lobby_handler(
     .fetch_optional(&state.db)
     .await;
 
-    let Some((lobby_id, name, host_user_id, max_players)) =
-        lobby.ok().flatten()
-    else {
+    let Some((lobby_id, name, host_user_id, max_players)) = lobby.ok().flatten() else {
         return Json(json!({
             "success": false,
             "error": "lobby_not_found"
@@ -956,13 +927,12 @@ async fn join_lobby_handler(
     Path(lobby_id): Path<String>,
     Json(request): Json<LobbyJoinRequest>,
 ) -> Json<Value> {
-    let user_id: Option<String> = sqlx::query_scalar(
-        "SELECT user_id FROM sessions WHERE token = ?",
-    )
-    .bind(&request.token)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
+    let user_id: Option<String> =
+        sqlx::query_scalar("SELECT user_id FROM sessions WHERE token = ?")
+            .bind(&request.token)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
 
     let Some(user_id) = user_id else {
         return Json(json!({
@@ -1002,16 +972,16 @@ async fn join_lobby_handler(
     .bind(&user_id)
     .fetch_one(&state.db)
     .await
-    .unwrap_or(0) > 0;
+    .unwrap_or(0)
+        > 0;
 
     if already_joined {
-        let players: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?",
-        )
-        .bind(&lobby_id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
+        let players: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?")
+                .bind(&lobby_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or(0);
 
         return Json(json!({
             "success": true,
@@ -1025,13 +995,11 @@ async fn join_lobby_handler(
         }));
     }
 
-    let players: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?",
-    )
-    .bind(&lobby_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
+    let players: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?")
+        .bind(&lobby_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
 
     if players >= max_players as i64 {
         return Json(json!({
@@ -1061,13 +1029,12 @@ async fn join_lobby_handler(
         }));
     }
 
-    let new_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?",
-    )
-    .bind(&lobby_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(players + 1);
+    let new_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?")
+            .bind(&lobby_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(players + 1);
 
     println!("Lobby join: lobby={} user={}", lobby_id, user_id);
 
@@ -1088,13 +1055,12 @@ async fn leave_lobby_handler(
     Path(lobby_id): Path<String>,
     Json(request): Json<LobbyJoinRequest>,
 ) -> Json<Value> {
-    let user_id: Option<String> = sqlx::query_scalar(
-        "SELECT user_id FROM sessions WHERE token = ?",
-    )
-    .bind(&request.token)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
+    let user_id: Option<String> =
+        sqlx::query_scalar("SELECT user_id FROM sessions WHERE token = ?")
+            .bind(&request.token)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
 
     let Some(user_id) = user_id else {
         return Json(json!({
@@ -1116,13 +1082,12 @@ async fn leave_lobby_handler(
 
     match result {
         Ok(result) => {
-            let remaining: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?",
-            )
-            .bind(&lobby_id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+            let remaining: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?")
+                    .bind(&lobby_id)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap_or(0);
 
             if remaining == 0 {
                 let _ = sqlx::query("DELETE FROM lobbies WHERE lobby_id = ?")
@@ -1149,13 +1114,8 @@ async fn leave_lobby_handler(
     }
 }
 
-async fn db_check_handler(
-    State(state): State<AppState>,
-) -> Json<Value> {
-    let connected = sqlx::query("SELECT 1")
-        .execute(&state.db)
-        .await
-        .is_ok();
+async fn db_check_handler(State(state): State<AppState>) -> Json<Value> {
+    let connected = sqlx::query("SELECT 1").execute(&state.db).await.is_ok();
 
     Json(json!({
         "status": if connected { "online" } else { "degraded" },
@@ -1164,9 +1124,7 @@ async fn db_check_handler(
     }))
 }
 
-async fn server_info_handler(
-    State(state): State<AppState>,
-) -> Json<Value> {
+async fn server_info_handler(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "name": "KLAY Friday the 13th Private Server",
         "status": "online",
