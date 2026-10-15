@@ -483,48 +483,63 @@ async fn profile_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Json<Value> {
-    let token = headers
+    let token = match headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .trim_start_matches("Bearer ");
+        .and_then(|value| value.strip_prefix("Bearer "))
+    {
+        Some(token) if !token.trim().is_empty() => token.trim(),
+        _ => {
+            return Json(json!({
+                "success": false,
+                "error": "authentication_required"
+            }));
+        }
+    };
 
-    if !token.is_empty() {
-        let valid = sqlx::query(
-            "SELECT user_id FROM sessions WHERE token = ?",
-        )
-        .bind(token)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
+    let session = sqlx::query_as::<_, (String, String)>(
+        "SELECT user_id, display_name FROM sessions WHERE token = ?"
+    )
+    .bind(token)
+    .fetch_optional(&state.db)
+    .await;
 
-        if !valid {
+    let (user_id, display_name) = match session {
+        Ok(Some(session)) => session,
+        Ok(None) => {
             return Json(json!({
                 "success": false,
                 "error": "invalid_session"
             }));
         }
-    }
+        Err(_) => {
+            return Json(json!({
+                "success": false,
+                "error": "database_error"
+            }));
+        }
+    };
 
     Json(json!({
         "success": true,
-        "level": 150,
-        "cp": 999999,
-        "dlc_unlocked": true,
-        "unlocked_assets": [
-            "savini_jason",
-            "backers_clothing_pack",
-            "counselor_clothing_dlc"
-        ],
-        "customization": {
-            "perkSlots": 3,
-            "badgeSlots": 3
-        }
+        "profile": {
+            "user_id": user_id,
+            "display_name": display_name
+        },
+        "custom_catalog": {
+            "assets": [
+                "savini_jason",
+                "backers_clothing_pack",
+                "counselor_clothing_dlc"
+            ],
+            "customization": {
+                "perkSlots": 3,
+                "badgeSlots": 3
+            }
+        },
+        "note": "Custom catalog only. Official game and platform entitlements are unchanged."
     }))
 }
-
 async fn record_offline_match_handler(
     State(state): State<AppState>,
     Json(request): Json<OfflineMatchRequest>,
