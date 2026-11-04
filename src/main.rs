@@ -541,7 +541,7 @@ async fn epic_callback_handler(
                     .find(|profile| profile.account_id == token.account_id)
                     .and_then(|profile| profile.display_name)
                     .filter(|name| !name.trim().is_empty())
-                    .unwrap_or(fallback_name),
+                    .unwrap_or(fallback_name.clone()),
                 Err(_) => fallback_name,
             }
         }
