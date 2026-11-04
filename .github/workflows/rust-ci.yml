@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - development/production-backend
+      - feature/epic-oauth-backend
   pull_request:
     branches:
       - master
