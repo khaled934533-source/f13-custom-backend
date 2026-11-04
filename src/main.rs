@@ -6,8 +6,10 @@ use std::time::Duration;
 use axum::Json;
 use axum::Router;
 use axum::extract::Path;
+use axum::extract::Query;
 use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::routing::post;
 use serde::Deserialize;
@@ -138,6 +140,9 @@ async fn main() {
     .execute(&db)
     .await
     .expect("Failed to create sessions table");
+
+    sqlx::query("CREATE TABLE IF NOT EXISTS epic_oauth_states (state TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        .execute(&db).await.expect("Failed to create Epic OAuth state table");
 
     sqlx::query(
         r#"
@@ -338,6 +343,9 @@ async fn main() {
         .route("/api/v1/protocol", post(protocol_unavailable_handler))
         .route("/api/v1/login", post(login_handler))
         .route("/api/v1/auth/psn", post(psn_auth_unavailable_handler))
+        .route("/auth/epic/login", get(epic_login_handler))
+        .route("/auth/epic/callback", get(epic_callback_handler))
+        .route("/auth/epic/me", get(epic_me_handler))
         .route("/api/v1/session/heartbeat", post(heartbeat_handler))
         .route("/api/v1/session/validate", post(validate_session_handler))
         .route("/api/v1/profiles/me", get(profile_handler))
