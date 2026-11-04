@@ -1147,12 +1147,12 @@ async fn search_lobbies_handler(
         LIMIT ?
         "#,
     )
-    .bind(&search_text)
-    .bind(&search_text)
-    .bind(&game_mode)
-    .bind(&game_mode)
-    .bind(&region)
-    .bind(&region)
+    .bind(search_text.as_deref())
+    .bind(search_text.as_deref())
+    .bind(game_mode.as_deref())
+    .bind(game_mode.as_deref())
+    .bind(region.as_deref())
+    .bind(region.as_deref())
     .bind(if include_full { 1_i64 } else { 0_i64 })
     .bind(min_open_slots)
     .bind(limit)
@@ -1316,6 +1316,34 @@ async fn join_lobby_handler(
         }));
     }
 
+    let insert_result = sqlx::query(
+        r#"
+        INSERT INTO lobby_players (lobby_id, user_id, ready)
+        SELECT ?, ?, 0
+        WHERE EXISTS (SELECT 1 FROM lobbies WHERE lobby_id = ?)
+          AND (SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?) < ?
+        ON CONFLICT(lobby_id, user_id) DO NOTHING
+        "#,
+    )
+    .bind(&lobby_id)
+    .bind(&user_id)
+    .bind(&lobby_id)
+    .bind(&lobby_id)
+    .bind(max_players)
+    .execute(&state.db)
+    .await;
+
+    let insert_result = match insert_result {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("Failed to join lobby: {error}");
+            return Json(json!({
+                "success": false,
+                "error": "join_failed"
+            }));
+        }
+    };
+
     let already_joined: bool = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*)
@@ -1327,75 +1355,29 @@ async fn join_lobby_handler(
     .bind(&user_id)
     .fetch_one(&state.db)
     .await
-    .unwrap_or(0)
-        > 0;
-
-    if already_joined {
-        let players: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?")
-                .bind(&lobby_id)
-                .fetch_one(&state.db)
-                .await
-                .unwrap_or(0);
-
-        return Json(json!({
-            "success": true,
-            "alreadyJoined": true,
-            "lobbyId": lobby_id,
-            "name": name,
-            "hostUserId": host_user_id,
-            "players": players,
-            "maxPlayers": max_players,
-            "status": if players >= max_players as i64 { "full" } else { "waiting" }
-        }));
-    }
-
-    let players: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?")
-        .bind(&lobby_id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
-
-    if players >= max_players as i64 {
-        return Json(json!({
-            "success": false,
-            "error": "lobby_full",
-            "players": players,
-            "maxPlayers": max_players
-        }));
-    }
-
-    let result = sqlx::query(
-        r#"
-        INSERT INTO lobby_players (lobby_id, user_id, ready)
-        VALUES (?, ?, 0)
-        "#,
-    )
-    .bind(&lobby_id)
-    .bind(&user_id)
-    .execute(&state.db)
-    .await;
-
-    if let Err(error) = result {
-        eprintln!("Failed to join lobby: {error}");
-        return Json(json!({
-            "success": false,
-            "error": "join_failed"
-        }));
-    }
+    .unwrap_or(0) > 0;
 
     let new_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM lobby_players WHERE lobby_id = ?")
             .bind(&lobby_id)
             .fetch_one(&state.db)
             .await
-            .unwrap_or(players + 1);
+            .unwrap_or(0);
+
+    if !already_joined {
+        return Json(json!({
+            "success": false,
+            "error": "lobby_full",
+            "players": new_count,
+            "maxPlayers": max_players
+        }));
+    }
 
     println!("Lobby join: lobby={} user={}", lobby_id, user_id);
 
     Json(json!({
         "success": true,
-        "alreadyJoined": false,
+        "alreadyJoined": insert_result.rows_affected() == 0,
         "lobbyId": lobby_id,
         "name": name,
         "hostUserId": host_user_id,
