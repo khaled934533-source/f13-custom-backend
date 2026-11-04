@@ -21,7 +21,7 @@ use uuid::Uuid;
 mod protocol;
 
 
-const SERVER_VERSION: &str = "0.5.0";
+const SERVER_VERSION: &str = "0.6.0";
 const DEFAULT_MAX_PLAYERS: i32 = 8;
 
 #[derive(Clone)]
@@ -342,7 +342,7 @@ async fn main() {
         .route("/api/v1/database/status", get(db_check_handler))
         .route("/api/v1/database_check", get(db_check_handler))
         .route("/api/v1/server/info", get(server_info_handler))
-        .route("/api/v1/lobbies", get(list_lobbies_handler))
+        .route("/api/v1/lobbies", get(search_lobbies_handler))
         .route("/api/v1/lobbies/search", get(search_lobbies_handler))
         .route("/api/v1/lobbies/create", post(create_lobby_handler))
         .route("/api/v1/lobbies/:lobby_id", get(get_lobby_handler))
@@ -365,7 +365,7 @@ async fn main() {
 }
 
 async fn home_handler() -> &'static str {
-    "KLAY Friday the 13th Private Server v0.5.0"
+    "KLAY Friday the 13th Private Server v0.6.0"
 }
 
 async fn health_handler(State(state): State<AppState>) -> Json<Value> {
@@ -935,7 +935,9 @@ async fn create_lobby_handler(
 
     let name = request
         .name
-        .unwrap_or_else(|| format!("{display_name}'s Lobby"));
+        .unwrap_or_else(|| format!("{display_name}'s Lobby"))
+        .trim()
+        .to_string();
 
     let max_players = request
         .max_players
@@ -1115,8 +1117,11 @@ async fn search_lobbies_handler(
         }));
     }
 
-    let min_open_slots = filters.min_open_slots.unwrap_or(1).clamp(0, DEFAULT_MAX_PLAYERS);
     let include_full = filters.include_full.unwrap_or(false);
+    let min_open_slots = filters
+        .min_open_slots
+        .unwrap_or(if include_full { 0 } else { 1 })
+        .clamp(0, DEFAULT_MAX_PLAYERS);
     let include_private = filters.include_private.unwrap_or(false);
     let limit = filters.limit.unwrap_or(25).clamp(1, 50);
 
@@ -1139,7 +1144,7 @@ async fn search_lobbies_handler(
           AND (? = 1 OR l.is_private = 0)
         GROUP BY l.lobby_id
         HAVING (? = 1 OR COUNT(lp.user_id) < l.max_players)
-           AND (? = 1 OR l.max_players - COUNT(lp.user_id) >= ?)
+           AND l.max_players - COUNT(lp.user_id) >= ?
         ORDER BY l.created_at DESC
         LIMIT ?
         "#,
@@ -1152,7 +1157,6 @@ async fn search_lobbies_handler(
     .bind(&region)
     .bind(if include_private { 1_i64 } else { 0_i64 })
     .bind(if include_full { 1_i64 } else { 0_i64 })
-    .bind(if min_open_slots == 0 { 1_i64 } else { 0_i64 })
     .bind(min_open_slots)
     .bind(limit)
     .fetch_all(&state.db)
@@ -1207,9 +1211,9 @@ async fn get_lobby_handler(
     State(state): State<AppState>,
     Path(lobby_id): Path<String>,
 ) -> Json<Value> {
-    let lobby = sqlx::query_as::<_, (String, String, String, i32)>(
+    let lobby = sqlx::query_as::<_, (String, String, String, i32, String, String, i64)>(
         r#"
-        SELECT lobby_id, name, host_user_id, max_players
+        SELECT lobby_id, name, host_user_id, max_players, game_mode, region, is_private
         FROM lobbies
         WHERE lobby_id = ?
         "#,
@@ -1218,7 +1222,7 @@ async fn get_lobby_handler(
     .fetch_optional(&state.db)
     .await;
 
-    let Some((lobby_id, name, host_user_id, max_players)) = lobby.ok().flatten() else {
+    let Some((lobby_id, name, host_user_id, max_players, game_mode, region, is_private)) = lobby.ok().flatten() else {
         return Json(json!({
             "success": false,
             "error": "lobby_not_found"
@@ -1261,6 +1265,9 @@ async fn get_lobby_handler(
             "hostUserId": host_user_id,
             "maxPlayers": max_players,
             "players": player_count,
+            "gameMode": game_mode,
+            "region": region,
+            "isPrivate": is_private != 0,
             "status": if player_count >= max_players as i64 { "full" } else { "waiting" },
             "members": player_list
         }
@@ -1286,9 +1293,9 @@ async fn join_lobby_handler(
         }));
     };
 
-    let lobby = sqlx::query_as::<_, (String, String, i32)>(
+    let lobby = sqlx::query_as::<_, (String, String, i32, i64)>(
         r#"
-        SELECT name, host_user_id, max_players
+        SELECT name, host_user_id, max_players, is_private
         FROM lobbies
         WHERE lobby_id = ?
         "#,
@@ -1299,12 +1306,19 @@ async fn join_lobby_handler(
     .ok()
     .flatten();
 
-    let Some((name, host_user_id, max_players)) = lobby else {
+    let Some((name, host_user_id, max_players, is_private)) = lobby else {
         return Json(json!({
             "success": false,
             "error": "lobby_not_found"
         }));
     };
+
+    if is_private != 0 && user_id != host_user_id {
+        return Json(json!({
+            "success": false,
+            "error": "private_lobby_invite_required"
+        }));
+    }
 
     let already_joined: bool = sqlx::query_scalar::<_, i64>(
         r#"
