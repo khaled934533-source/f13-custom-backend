@@ -12,8 +12,20 @@ py -m http.server 8000 --directory website
 
 Then visit `http://localhost:8000`.
 
-## Important
+## Epic sign-in status
 
-The Epic sign-in button is intentionally a placeholder. Do not register a redirect URL yet. A real Epic Account Services sign-in flow requires a backend callback endpoint, OAuth state validation, authorization-code exchange on the server, and secure session handling. Never put a client secret in browser JavaScript.
+The website button now redirects to `/auth/epic/login`. The Rust backend on this branch still needs that route and its callback before sign-in can work. Do not deploy this as a working login yet.
+
+A real Epic Account Services web login requires:
+- An HTTPS callback URL registered for the correct Epic client.
+- A server-side authorization-code exchange.
+- One-time OAuth `state` validation to protect against CSRF.
+- Epic Client ID, Client Secret, and Deployment ID stored as server environment variables.
+- Secure KLAY session handling after Epic identity is verified.
+
+Never put the Epic Client Secret in `app.js` or any other browser-side file.
+
+Official Epic documentation:
+https://dev.epicgames.com/docs/epic-online-services/accounts-and-social/eos-epic-account-services/getting-started
 
 This website is a community project and is not officially affiliated with IllFonic, Gun Media, or Epic Games.
