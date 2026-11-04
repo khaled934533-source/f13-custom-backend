@@ -1,0 +1,32 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - master
+      - development/production-backend
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Format, check, and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format workspace
+        run: cargo fmt --all
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+      - name: Compile all targets
+        run: cargo check --all-targets
+      - name: Run tests
+        run: cargo test --all-targets
