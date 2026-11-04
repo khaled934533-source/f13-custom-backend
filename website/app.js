@@ -1,5 +1,11 @@
-document.getElementById("year").textContent = new Date().getFullYear();
+const yearElement = document.getElementById("year");
+const epicLoginButton = document.getElementById("epic-login");
 
-document.getElementById("epic-login").addEventListener("click", () => {
-  window.alert("تسجيل الدخول عبر Epic لم يُفعّل بعد. سيتم تفعيله بعد إعداد OAuth وربط Callback آمن بخادم KLAY.");
+if (yearElement) {
+  yearElement.textContent = String(new Date().getFullYear());
+}
+
+epicLoginButton?.addEventListener("click", () => {
+  // This route must be implemented by the Rust backend before sign-in can work.
+  window.location.assign("/auth/epic/login");
 });
