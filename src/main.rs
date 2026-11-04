@@ -57,7 +57,6 @@ struct LobbySearchQuery {
     region: Option<String>,
     min_open_slots: Option<i32>,
     include_full: Option<bool>,
-    include_private: Option<bool>,
     limit: Option<i64>,
 }
 
@@ -1122,7 +1121,6 @@ async fn search_lobbies_handler(
         .min_open_slots
         .unwrap_or(if include_full { 0 } else { 1 })
         .clamp(0, DEFAULT_MAX_PLAYERS);
-    let include_private = filters.include_private.unwrap_or(false);
     let limit = filters.limit.unwrap_or(25).clamp(1, 50);
 
     let rows = sqlx::query_as::<_, (String, String, String, i32, String, String, i64, i64)>(
@@ -1141,7 +1139,7 @@ async fn search_lobbies_handler(
         WHERE (? IS NULL OR lower(l.name) LIKE '%' || lower(?) || '%')
           AND (? IS NULL OR l.game_mode = ?)
           AND (? IS NULL OR l.region = ?)
-          AND (? = 1 OR l.is_private = 0)
+          AND l.is_private = 0
         GROUP BY l.lobby_id
         HAVING (? = 1 OR COUNT(lp.user_id) < l.max_players)
            AND l.max_players - COUNT(lp.user_id) >= ?
@@ -1155,7 +1153,6 @@ async fn search_lobbies_handler(
     .bind(&game_mode)
     .bind(&region)
     .bind(&region)
-    .bind(if include_private { 1_i64 } else { 0_i64 })
     .bind(if include_full { 1_i64 } else { 0_i64 })
     .bind(min_open_slots)
     .bind(limit)
@@ -1200,7 +1197,6 @@ async fn search_lobbies_handler(
             "region": region,
             "minOpenSlots": min_open_slots,
             "includeFull": include_full,
-            "includePrivate": include_private,
             "limit": limit
         },
         "lobbies": lobbies
