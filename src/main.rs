@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use axum::Json;
 use axum::Router;
 use axum::extract::Path;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode};
 use axum::routing::get;
@@ -44,6 +45,20 @@ struct LobbyCreateRequest {
     token: String,
     name: Option<String>,
     max_players: Option<i32>,
+    game_mode: Option<String>,
+    region: Option<String>,
+    is_private: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LobbySearchQuery {
+    q: Option<String>,
+    game_mode: Option<String>,
+    region: Option<String>,
+    min_open_slots: Option<i32>,
+    include_full: Option<bool>,
+    include_private: Option<bool>,
+    limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +158,9 @@ async fn main() {
             name TEXT NOT NULL,
             host_user_id TEXT NOT NULL,
             max_players INTEGER NOT NULL,
+            game_mode TEXT NOT NULL DEFAULT 'quickplay',
+            region TEXT NOT NULL DEFAULT 'auto',
+            is_private INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         "#,
@@ -150,6 +168,40 @@ async fn main() {
     .execute(&db)
     .await
     .expect("Failed to create lobbies table");
+
+    let lobby_columns: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM pragma_table_info('lobbies')",
+    )
+    .fetch_all(&db)
+    .await
+    .expect("Failed to inspect lobbies table");
+
+    if !lobby_columns.iter().any(|column| column == "game_mode") {
+        sqlx::query(
+            "ALTER TABLE lobbies ADD COLUMN game_mode TEXT NOT NULL DEFAULT 'quickplay'",
+        )
+        .execute(&db)
+        .await
+        .expect("Failed to add lobbies.game_mode");
+    }
+
+    if !lobby_columns.iter().any(|column| column == "region") {
+        sqlx::query(
+            "ALTER TABLE lobbies ADD COLUMN region TEXT NOT NULL DEFAULT 'auto'",
+        )
+        .execute(&db)
+        .await
+        .expect("Failed to add lobbies.region");
+    }
+
+    if !lobby_columns.iter().any(|column| column == "is_private") {
+        sqlx::query(
+            "ALTER TABLE lobbies ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&db)
+        .await
+        .expect("Failed to add lobbies.is_private");
+    }
 
     sqlx::query(
         r#"
@@ -291,6 +343,7 @@ async fn main() {
         .route("/api/v1/database_check", get(db_check_handler))
         .route("/api/v1/server/info", get(server_info_handler))
         .route("/api/v1/lobbies", get(list_lobbies_handler))
+        .route("/api/v1/lobbies/search", get(search_lobbies_handler))
         .route("/api/v1/lobbies/create", post(create_lobby_handler))
         .route("/api/v1/lobbies/:lobby_id", get(get_lobby_handler))
         .route("/api/v1/lobbies/:lobby_id/join", post(join_lobby_handler))
@@ -889,16 +942,47 @@ async fn create_lobby_handler(
         .unwrap_or(DEFAULT_MAX_PLAYERS)
         .clamp(1, DEFAULT_MAX_PLAYERS);
 
+    let game_mode = request
+        .game_mode
+        .unwrap_or_else(|| "quickplay".to_string())
+        .trim()
+        .to_ascii_lowercase();
+
+    let region = request
+        .region
+        .unwrap_or_else(|| "auto".to_string())
+        .trim()
+        .to_ascii_lowercase();
+
+    let is_private = request.is_private.unwrap_or(false);
+
+    if name.trim().is_empty()
+        || name.chars().count() > 48
+        || game_mode.is_empty()
+        || game_mode.len() > 32
+        || region.is_empty()
+        || region.len() > 24
+    {
+        return Json(json!({
+            "success": false,
+            "error": "invalid_lobby_settings"
+        }));
+    }
+
     let create_result = sqlx::query(
         r#"
-        INSERT INTO lobbies (lobby_id, name, host_user_id, max_players)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO lobbies
+            (lobby_id, name, host_user_id, max_players, game_mode, region, is_private)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&lobby_id)
     .bind(&name)
     .bind(&user_id)
     .bind(max_players)
+    .bind(&game_mode)
+    .bind(&region)
+    .bind(if is_private { 1_i64 } else { 0_i64 })
     .execute(&state.db)
     .await;
 
@@ -944,6 +1028,9 @@ async fn create_lobby_handler(
         "hostUserId": user_id,
         "maxPlayers": max_players,
         "players": 1,
+        "gameMode": game_mode,
+        "region": region,
+        "isPrivate": is_private,
         "status": "waiting"
     }))
 }
@@ -983,6 +1070,136 @@ async fn list_lobbies_handler(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "success": true,
         "lobbies": result
+    }))
+}
+
+
+async fn search_lobbies_handler(
+    State(state): State<AppState>,
+    Query(filters): Query<LobbySearchQuery>,
+) -> Json<Value> {
+    let search_text = filters
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if search_text.as_ref().is_some_and(|value| value.chars().count() > 48) {
+        return Json(json!({
+            "success": false,
+            "error": "search_text_too_long"
+        }));
+    }
+
+    let game_mode = filters
+        .game_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+
+    let region = filters
+        .region
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+
+    if game_mode.as_ref().is_some_and(|value| value.len() > 32)
+        || region.as_ref().is_some_and(|value| value.len() > 24)
+    {
+        return Json(json!({
+            "success": false,
+            "error": "invalid_search_filter"
+        }));
+    }
+
+    let min_open_slots = filters.min_open_slots.unwrap_or(1).clamp(0, DEFAULT_MAX_PLAYERS);
+    let include_full = filters.include_full.unwrap_or(false);
+    let include_private = filters.include_private.unwrap_or(false);
+    let limit = filters.limit.unwrap_or(25).clamp(1, 50);
+
+    let rows = sqlx::query_as::<_, (String, String, String, i32, String, String, i64, i64)>(
+        r#"
+        SELECT
+            l.lobby_id,
+            l.name,
+            l.host_user_id,
+            l.max_players,
+            l.game_mode,
+            l.region,
+            l.is_private,
+            COUNT(lp.user_id) AS player_count
+        FROM lobbies l
+        LEFT JOIN lobby_players lp ON lp.lobby_id = l.lobby_id
+        WHERE (? IS NULL OR lower(l.name) LIKE '%' || lower(?) || '%')
+          AND (? IS NULL OR l.game_mode = ?)
+          AND (? IS NULL OR l.region = ?)
+          AND (? = 1 OR l.is_private = 0)
+        GROUP BY l.lobby_id
+        HAVING (? = 1 OR COUNT(lp.user_id) < l.max_players)
+           AND (? = 1 OR l.max_players - COUNT(lp.user_id) >= ?)
+        ORDER BY l.created_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(&search_text)
+    .bind(&search_text)
+    .bind(&game_mode)
+    .bind(&game_mode)
+    .bind(&region)
+    .bind(&region)
+    .bind(if include_private { 1_i64 } else { 0_i64 })
+    .bind(if include_full { 1_i64 } else { 0_i64 })
+    .bind(if min_open_slots == 0 { 1_i64 } else { 0_i64 })
+    .bind(min_open_slots)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await;
+
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            eprintln!("Lobby search failed: {error}");
+            return Json(json!({
+                "success": false,
+                "error": "lobby_search_failed"
+            }));
+        }
+    };
+
+    let lobbies: Vec<Value> = rows
+        .into_iter()
+        .map(|(lobby_id, name, host_user_id, max_players, game_mode, region, is_private, players)| {
+            json!({
+                "lobbyId": lobby_id,
+                "name": name,
+                "hostUserId": host_user_id,
+                "maxPlayers": max_players,
+                "players": players,
+                "openSlots": (max_players as i64 - players).max(0),
+                "gameMode": game_mode,
+                "region": region,
+                "isPrivate": is_private != 0,
+                "status": if players >= max_players as i64 { "full" } else { "waiting" }
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "success": true,
+        "count": lobbies.len(),
+        "filters": {
+            "query": search_text,
+            "gameMode": game_mode,
+            "region": region,
+            "minOpenSlots": min_open_slots,
+            "includeFull": include_full,
+            "includePrivate": include_private,
+            "limit": limit
+        },
+        "lobbies": lobbies
     }))
 }
 
@@ -1266,6 +1483,7 @@ async fn server_info_handler(State(state): State<AppState>) -> Json<Value> {
             "session_validation",
             "lobbies",
             "lobby_details",
+            "lobby_search_filters",
             "lobby_join",
             "lobby_leave",
             "protocol",
