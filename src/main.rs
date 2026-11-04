@@ -396,6 +396,14 @@ struct EpicTokenResponse {
     account_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct EpicAccountProfile {
+    #[serde(rename = "accountId")]
+    account_id: String,
+    #[serde(rename = "displayName")]
+    display_name: Option<String>,
+}
+
 fn request_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     headers.get(axum::http::header::COOKIE)?.to_str().ok()?
         .split(';').filter_map(|part| part.trim().split_once('='))
@@ -403,7 +411,7 @@ fn request_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn expire_oauth_cookie(response: &mut Response) {
-    response.headers_mut().insert(SET_COOKIE, HeaderValue::from_static(
+    response.headers_mut().append(SET_COOKIE, HeaderValue::from_static(
         "klay_oauth_state=; Path=/auth/epic; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
     ));
 }
@@ -519,7 +527,26 @@ async fn epic_callback_handler(
     };
 
     let user_id = format!("epic:{}", token.account_id);
-    let display_name = format!("Epic_{}", &token.account_id[..token.account_id.len().min(8)]);
+    let fallback_name = format!("Epic_{}", &token.account_id[..token.account_id.len().min(8)]);
+    let display_name = match reqwest::Client::new()
+        .get("https://api.epicgames.dev/epic/id/v2/accounts")
+        .query(&[("accountId", token.account_id.as_str())])
+        .bearer_auth(&token.access_token)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            match response.json::<Vec<EpicAccountProfile>>().await {
+                Ok(profiles) => profiles.into_iter()
+                    .find(|profile| profile.account_id == token.account_id)
+                    .and_then(|profile| profile.display_name)
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(fallback_name),
+                Err(_) => fallback_name,
+            }
+        }
+        _ => fallback_name,
+    };
     let session_token = Uuid::new_v4().to_string();
     let saved = sqlx::query(
         "INSERT INTO sessions (user_id, display_name, token) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET display_name = excluded.display_name, token = excluded.token, last_seen = CURRENT_TIMESTAMP"
@@ -530,7 +557,7 @@ async fn epic_callback_handler(
     }
 
     let mut response = Redirect::to("/").into_response();
-    let cookie = format!("klay_session={session_token}; Path=/; HttpOnly; Secure; SameSite=Lax");
+    let cookie = format!("klay_session={session_token}; Path=/; Max-Age=604800; HttpOnly; Secure; SameSite=Lax");
     match HeaderValue::from_str(&cookie) {
         Ok(value) => {
             response.headers_mut().insert(SET_COOKIE, value);
