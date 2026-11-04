@@ -382,6 +382,183 @@ async fn main() {
     axum::serve(listener, app).await.expect("Server failed");
 }
 
+
+#[derive(Debug, Deserialize)]
+struct EpicCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EpicTokenResponse {
+    access_token: String,
+    account_id: String,
+}
+
+fn request_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers.get(axum::http::header::COOKIE)?.to_str().ok()?
+        .split(';').filter_map(|part| part.trim().split_once('='))
+        .find_map(|(key, value)| if key == name { Some(value.to_string()) } else { None })
+}
+
+fn expire_oauth_cookie(response: &mut Response) {
+    response.headers_mut().insert(SET_COOKIE, HeaderValue::from_static(
+        "klay_oauth_state=; Path=/auth/epic; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+    ));
+}
+
+fn oauth_error(status: StatusCode, message: &'static str) -> Response {
+    let mut response = (status, message).into_response();
+    expire_oauth_cookie(&mut response);
+    response
+}
+
+async fn epic_login_handler(State(state): State<AppState>) -> Response {
+    let client_id = match env::var("EPIC_CLIENT_ID") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return (StatusCode::SERVICE_UNAVAILABLE, "Missing EPIC_CLIENT_ID").into_response(),
+    };
+    let redirect_uri = match env::var("EPIC_REDIRECT_URI") {
+        Ok(value) if value.starts_with("https://") => value,
+        _ => return (StatusCode::SERVICE_UNAVAILABLE, "Set EPIC_REDIRECT_URI to the registered HTTPS callback").into_response(),
+    };
+
+    let state_value = Uuid::new_v4().simple().to_string();
+    if let Err(error) = sqlx::query("INSERT INTO epic_oauth_states (state) VALUES (?)")
+        .bind(&state_value).execute(&state.db).await {
+        eprintln!("Epic OAuth state insert failed: {error}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Could not start Epic sign-in").into_response();
+    }
+
+    let mut url = match reqwest::Url::parse("https://www.epicgames.com/id/authorize") {
+        Ok(url) => url,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Invalid Epic authorization URL").into_response(),
+    };
+    url.query_pairs_mut()
+        .append_pair("client_id", &client_id)
+        .append_pair("response_type", "code")
+        .append_pair("scope", "basic_profile")
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("state", &state_value);
+
+    let mut response = Redirect::to(url.as_str()).into_response();
+    let cookie = format!("klay_oauth_state={state_value}; Path=/auth/epic; Max-Age=600; HttpOnly; Secure; SameSite=Lax");
+    match HeaderValue::from_str(&cookie) {
+        Ok(value) => { response.headers_mut().insert(SET_COOKIE, value); response }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Could not set OAuth state cookie").into_response(),
+    }
+}
+
+async fn epic_callback_handler(
+    State(state): State<AppState>,
+    Query(query): Query<EpicCallbackQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if query.error.is_some() {
+        return oauth_error(StatusCode::UNAUTHORIZED, "Epic sign-in was cancelled or denied");
+    }
+    let code = match query.code.as_deref() {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => return oauth_error(StatusCode::BAD_REQUEST, "Missing Epic authorization code"),
+    };
+    let returned_state = match query.state.as_deref() {
+        Some(value) => value,
+        None => return oauth_error(StatusCode::BAD_REQUEST, "Missing OAuth state"),
+    };
+    let browser_state = match request_cookie(&headers, "klay_oauth_state") {
+        Some(value) => value,
+        None => return oauth_error(StatusCode::BAD_REQUEST, "Missing browser state cookie"),
+    };
+    if returned_state != browser_state {
+        return oauth_error(StatusCode::BAD_REQUEST, "OAuth state mismatch");
+    }
+
+    let consumed = sqlx::query("DELETE FROM epic_oauth_states WHERE state = ? AND created_at >= datetime('now', '-10 minutes')")
+        .bind(returned_state).execute(&state.db).await;
+    match consumed {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => return oauth_error(StatusCode::BAD_REQUEST, "OAuth state expired or already used"),
+        Err(error) => {
+            eprintln!("Epic OAuth state validation failed: {error}");
+            return oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "Could not validate OAuth state");
+        }
+    }
+
+    let client_id = match env::var("EPIC_CLIENT_ID") { Ok(v) if !v.is_empty() => v, _ => return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "Missing EPIC_CLIENT_ID") };
+    let client_secret = match env::var("EPIC_CLIENT_SECRET") { Ok(v) if !v.is_empty() => v, _ => return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "Missing EPIC_CLIENT_SECRET") };
+    let deployment_id = match env::var("EPIC_DEPLOYMENT_ID") { Ok(v) if !v.is_empty() => v, _ => return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "Missing EPIC_DEPLOYMENT_ID") };
+    let redirect_uri = match env::var("EPIC_REDIRECT_URI") { Ok(v) if v.starts_with("https://") => v, _ => return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "Missing HTTPS callback URI") };
+
+    let token_response = reqwest::Client::new()
+        .post("https://api.epicgames.dev/epic/oauth/v2/token")
+        .basic_auth(client_id, Some(client_secret))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("deployment_id", deployment_id.as_str()),
+            ("scope", "basic_profile"),
+            ("code", code),
+            ("redirect_uri", redirect_uri.as_str()),
+        ])
+        .send().await;
+
+    let token_response = match token_response {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            eprintln!("Epic token exchange returned HTTP {}", response.status());
+            return oauth_error(StatusCode::UNAUTHORIZED, "Epic rejected the authorization code");
+        }
+        Err(error) => {
+            eprintln!("Epic token exchange request failed: {error}");
+            return oauth_error(StatusCode::BAD_GATEWAY, "Could not reach Epic authentication");
+        }
+    };
+    let token: EpicTokenResponse = match token_response.json().await {
+        Ok(value) if !value.account_id.trim().is_empty() && !value.access_token.trim().is_empty() => value,
+        _ => return oauth_error(StatusCode::BAD_GATEWAY, "Epic returned an invalid token response"),
+    };
+
+    let user_id = format!("epic:{}", token.account_id);
+    let display_name = format!("Epic_{}", &token.account_id[..token.account_id.len().min(8)]);
+    let session_token = Uuid::new_v4().to_string();
+    let saved = sqlx::query(
+        "INSERT INTO sessions (user_id, display_name, token) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET display_name = excluded.display_name, token = excluded.token, last_seen = CURRENT_TIMESTAMP"
+    ).bind(&user_id).bind(&display_name).bind(&session_token).execute(&state.db).await;
+    if let Err(error) = saved {
+        eprintln!("Epic session insert failed: {error}");
+        return oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "Could not create KLAY session");
+    }
+
+    let mut response = Redirect::to("/").into_response();
+    let cookie = format!("klay_session={session_token}; Path=/; HttpOnly; Secure; SameSite=Lax");
+    match HeaderValue::from_str(&cookie) {
+        Ok(value) => {
+            response.headers_mut().insert(SET_COOKIE, value);
+            expire_oauth_cookie(&mut response);
+            response
+        }
+        Err(_) => oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "Could not create secure session cookie"),
+    }
+}
+
+async fn epic_me_handler(State(state): State<AppState>, headers: HeaderMap) -> (StatusCode, Json<Value>) {
+    let token = match request_cookie(&headers, "klay_session") {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => return (StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "authentication_required"}))),
+    };
+    let session = sqlx::query_as::<_, (String, String)>("SELECT user_id, display_name FROM sessions WHERE token = ?")
+        .bind(token).fetch_optional(&state.db).await;
+    match session {
+        Ok(Some((user_id, display_name))) if user_id.starts_with("epic:") =>
+            (StatusCode::OK, Json(json!({"success": true, "userId": user_id, "displayName": display_name, "provider": "epic"}))),
+        Ok(_) => (StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "invalid_session"}))),
+        Err(error) => {
+            eprintln!("Epic session lookup failed: {error}");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"success": false, "error": "database_error"})))
+        }
+    }
+}
+
 async fn home_handler() -> &'static str {
     "KLAY Friday the 13th Private Server v0.5.0"
 }
