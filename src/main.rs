@@ -521,7 +521,7 @@ async fn epic_callback_handler(
             return oauth_error(StatusCode::BAD_GATEWAY, "Could not reach Epic authentication");
         }
     };
-    let token: EpicTokenResponse = match token_response.json().await {
+    let token: EpicTokenResponse = match token_response.json::<EpicTokenResponse>().await {
         Ok(value) if !value.account_id.trim().is_empty() && !value.access_token.trim().is_empty() => value,
         _ => return oauth_error(StatusCode::BAD_GATEWAY, "Epic returned an invalid token response"),
     };
